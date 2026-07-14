@@ -1,0 +1,1705 @@
+// ==UserScript==
+// @name         广东省干部培训网络学院专题学习助手
+// @namespace    https://gbpx.gd.gov.cn/
+// @version      1.4.9
+// @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
+// @author       User & Codex
+// @license      MIT
+// @updateURL    https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js
+// @match        https://gbpx.gd.gov.cn/gdceportal/dist/*
+// @match        https://wcs1.shawcoder.xyz/gdcecw/*
+// @match        https://cs1.gdgbpx.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const VERSION = '1.4.9';
+    const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
+    const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
+    const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
+    const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
+    const MAX_LOG_ENTRIES = 600;
+    const IMPORTANT_LOG_RESERVE = 180;
+    const LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+    const HIGH_FREQUENCY_LOG_INTERVAL_MS = 5000;
+    const HIGH_FREQUENCY_LOG_EVENTS = new Set([
+        'video-paused', 'video-playing', 'video-native-stalled',
+        'video-started', 'player-start-attempt', 'player-event-received', 'publish-event'
+    ]);
+    const DEBUG_BRIDGE_URL = 'http://127.0.0.1:17891/ingest';
+    const MAIN_HOST = 'gbpx.gd.gov.cn';
+    const PLAYER_HOSTS = new Set(['wcs1.shawcoder.xyz', 'cs1.gdgbpx.com']);
+    const TICK_MS = 1200;
+    const DETAIL_REFRESH_DELAY_MS = 8000;
+    const MAX_PROGRESS_REFRESHES = 4;
+    const SERVER_PROGRESS_POLL_MS = 30000;
+    const COMPLETED_CLOSE_RETRY_MS = 6000;
+    const COMPLETED_CLOSE_GRACE_MS = 60000;
+    const MAX_COMPLETED_CLOSE_RETRIES = 5;
+    const PLAYER_REOPEN_COOLDOWN_MS = 3000;
+
+    let mainTickTimer = null;
+    let detailRefreshTimer = null;
+    let serverProgressMonitorTimer = null;
+    let panel = null;
+    let playerVideo = null;
+    let playerTimer = null;
+    let lastPlayerProgressAt = Date.now();
+    let lastPlayerTime = -1;
+    let lastPlayerReportAt = 0;
+    let lastHandledEventId = '';
+    let playerEndedPublished = false;
+    let playerSource = '';
+    let playerPlaybackStarted = false;
+    let lastPlayAttemptAt = 0;
+    let lastPlayerWaitLogAt = 0;
+    let lastDomSummary = '';
+    let lastAutoScrolledLessonKey = '';
+    let bridgeQueue = [];
+    let bridgeFlushTimer = null;
+    let bridgeSending = false;
+    let bridgeConnected = false;
+    const logThrottle = new Map();
+    let playerLessonKey = '';
+    let emptyStudyingListSeenAt = 0;
+    let playerRecoverySeekApplied = false;
+
+    function defaultState() {
+        return {
+            version: VERSION,
+            status: 'idle',
+            phase: 'idle',
+            message: '请进入“专题学习 → 在学”，然后点击开始',
+            currentWorkshopTitle: '',
+            currentClassId: '',
+            currentLessonTitle: '',
+            currentLessonKey: '',
+            currentLessonProgress: 0,
+            beforeProgress: 0,
+            currentPage: 1,
+            lastActionAt: 0,
+            refreshAttempts: 0,
+            openAttempts: 0,
+            finishedWorkshopTitles: [],
+            skippedLessonKeys: [],
+            skipRequestAt: 0,
+            stopRequestAt: 0,
+            completedCloseRequestAt: 0,
+            completedCloseAttempts: 0,
+            settings: {
+                playbackRate: 1,
+                muted: true,
+                autoResume: true,
+                stallMinutes: 3,
+                closeOnStall: false
+            }
+        };
+    }
+
+    function getState() {
+        const saved = GM_getValue(STATE_KEY, null);
+        const base = defaultState();
+        if (!saved || typeof saved !== 'object') return base;
+        const merged = {
+            ...base,
+            ...saved,
+            settings: { ...base.settings, ...(saved.settings || {}) },
+            finishedWorkshopTitles: Array.isArray(saved.finishedWorkshopTitles)
+                ? saved.finishedWorkshopTitles
+                : [],
+            skippedLessonKeys: Array.isArray(saved.skippedLessonKeys)
+                ? saved.skippedLessonKeys
+                : []
+        };
+        // v1.4.2 could treat a non-100% status label as complete. Convert that
+        // one stale recovery state into a safe recheck instead of leaving playback paused.
+        if (saved.version === '1.4.2' && merged.phase === 'completed-close-failed') {
+            merged.status = 'running';
+            merged.phase = 'checking-progress';
+            merged.message = '已升级完成判定；正在重新核验服务器进度并恢复播放';
+            merged.completedCloseRequestAt = 0;
+            merged.completedCloseAttempts = 0;
+        }
+        // 实测站点按实际学习时长记进度，倍速会导致视频结束但课程仍未完成。
+        merged.settings.playbackRate = 1;
+        return merged;
+    }
+
+    function updateState(change) {
+        const current = getState();
+        const patch = typeof change === 'function' ? change(current) : change;
+        if (!patch) return current;
+        const next = {
+            ...current,
+            ...patch,
+            version: VERSION,
+            settings: { ...current.settings, ...(patch.settings || {}) }
+        };
+        next.settings.playbackRate = 1;
+        GM_setValue(STATE_KEY, next);
+        if (current.status !== next.status || current.phase !== next.phase || current.message !== next.message) {
+            debugLog('info', 'state-change', {
+                from: { status: current.status, phase: current.phase },
+                to: { status: next.status, phase: next.phase },
+                message: next.message,
+                workshop: next.currentWorkshopTitle,
+                lesson: next.currentLessonTitle
+            });
+        }
+        if (location.hostname === MAIN_HOST && window.top === window) renderPanel(next);
+        return next;
+    }
+
+    function publishEvent(type, detail = {}) {
+        const event = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            type,
+            at: Date.now(),
+            lessonKey: PLAYER_HOSTS.has(location.hostname) ? playerLessonKey : '',
+            ...detail
+        };
+        debugLog('info', 'publish-event', { type, detail });
+        GM_setValue(EVENT_KEY, event);
+    }
+
+    function contextName() {
+        if (location.hostname === MAIN_HOST) return 'main';
+        if (window.top === window) return 'player-top';
+        return 'player-frame';
+    }
+
+    function sanitizedUrl() {
+        return location.href
+            .replace(/([?&#](?:token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
+            .slice(0, 500);
+    }
+
+    function sanitizeLogValue(value, depth = 0) {
+        if (depth > 4) return '[max-depth]';
+        if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+        if (typeof value === 'string') {
+            const scrubbed = value
+                .replace(/([?&#](?:token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
+                .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+                .replace(/(cookie\s*[:=]\s*)[^\r\n,}]+/gi, '$1[redacted]');
+            return scrubbed.length > 1000 ? `${scrubbed.slice(0, 1000)}…` : scrubbed;
+        }
+        if (value instanceof Error) {
+            return { name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 3000) };
+        }
+        if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeLogValue(item, depth + 1));
+        if (typeof value === 'object') {
+            const result = {};
+            for (const [key, item] of Object.entries(value).slice(0, 50)) {
+                if (/token|cookie|authorization|password|secret|session/i.test(key)) {
+                    result[key] = '[redacted]';
+                } else {
+                    result[key] = sanitizeLogValue(item, depth + 1);
+                }
+            }
+            return result;
+        }
+        return String(value);
+    }
+
+    function getLogs() {
+        const logs = GM_getValue(LOG_KEY, []);
+        return Array.isArray(logs) ? logs : [];
+    }
+
+    function compactStoredLogs(logs, now = Date.now()) {
+        const fresh = logs.filter((entry) => {
+            const time = Date.parse(entry?.time || '');
+            return Number.isFinite(time) && now - time <= LOG_RETENTION_MS;
+        });
+        if (fresh.length <= MAX_LOG_ENTRIES) return fresh;
+        const important = fresh.filter((entry) => ['warn', 'error'].includes(entry.level));
+        const normal = fresh.filter((entry) => !['warn', 'error'].includes(entry.level));
+        const retainedImportant = important.slice(-Math.min(IMPORTANT_LOG_RESERVE, MAX_LOG_ENTRIES));
+        const retainedNormal = normal.slice(-(MAX_LOG_ENTRIES - retainedImportant.length));
+        return [...retainedNormal, ...retainedImportant]
+            .sort((left, right) => Date.parse(left.time) - Date.parse(right.time));
+    }
+
+    function throttleLog(level, event) {
+        if (level !== 'info' || !HIGH_FREQUENCY_LOG_EVENTS.has(event)) return 0;
+        const key = `${contextName()}:${event}`;
+        const now = Date.now();
+        const previous = logThrottle.get(key);
+        if (previous && now - previous.at < HIGH_FREQUENCY_LOG_INTERVAL_MS) {
+            previous.suppressed += 1;
+            return -1;
+        }
+        const suppressed = previous?.suppressed || 0;
+        logThrottle.set(key, { at: now, suppressed: 0 });
+        return suppressed;
+    }
+
+    function debugLog(level, event, detail = {}) {
+        try {
+            const suppressedRepeats = throttleLog(level, event);
+            if (suppressedRepeats < 0) return;
+            const entry = {
+                time: new Date().toISOString(),
+                level,
+                context: contextName(),
+                event,
+                url: sanitizedUrl(),
+                detail: sanitizeLogValue(detail)
+            };
+            if (suppressedRepeats) entry.detail.suppressedRepeats = suppressedRepeats;
+            const logs = compactStoredLogs([...getLogs(), entry]);
+            GM_setValue(LOG_KEY, logs);
+            const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
+            console[method]('[GBP助手]', event, entry.detail);
+            queueBridgeLog(entry);
+            updateLogCount();
+        } catch (error) {
+            console.error('[GBP助手] 写入日志失败', error);
+        }
+    }
+
+    function queueBridgeLog(entry) {
+        bridgeQueue.push(entry);
+        if (bridgeQueue.length > 200) bridgeQueue.splice(0, bridgeQueue.length - 200);
+        if (!bridgeFlushTimer) bridgeFlushTimer = setTimeout(flushBridgeLogs, 800);
+    }
+
+    function flushBridgeLogs() {
+        bridgeFlushTimer = null;
+        if (bridgeSending || !bridgeQueue.length) return;
+        const entries = bridgeQueue.splice(0, 50);
+        bridgeSending = true;
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: DEBUG_BRIDGE_URL,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-GBP-Logger': 'v1'
+            },
+            data: JSON.stringify({ scriptVersion: VERSION, sentAt: new Date().toISOString(), entries }),
+            timeout: 2000,
+            onload(response) {
+                bridgeSending = false;
+                bridgeConnected = response.status >= 200 && response.status < 300;
+                if (!bridgeConnected) bridgeQueue.unshift(...entries);
+                updateBridgeStatus();
+                if (bridgeQueue.length) bridgeFlushTimer = setTimeout(flushBridgeLogs, bridgeConnected ? 250 : 10000);
+            },
+            onerror() {
+                bridgeSending = false;
+                bridgeConnected = false;
+                bridgeQueue.unshift(...entries);
+                if (bridgeQueue.length > 200) bridgeQueue.splice(0, bridgeQueue.length - 200);
+                updateBridgeStatus();
+                bridgeFlushTimer = setTimeout(flushBridgeLogs, 10000);
+            },
+            ontimeout() {
+                bridgeSending = false;
+                bridgeConnected = false;
+                bridgeQueue.unshift(...entries);
+                if (bridgeQueue.length > 200) bridgeQueue.splice(0, bridgeQueue.length - 200);
+                updateBridgeStatus();
+                bridgeFlushTimer = setTimeout(flushBridgeLogs, 10000);
+            }
+        });
+    }
+
+    function diagnosticBundle() {
+        const state = getState();
+        return {
+            generatedAt: new Date().toISOString(),
+            scriptVersion: VERSION,
+            userAgent: navigator.userAgent,
+            url: sanitizedUrl(),
+            context: contextName(),
+            state: sanitizeLogValue(state),
+            logs: getLogs()
+        };
+    }
+
+    function diagnosticText() {
+        return JSON.stringify(diagnosticBundle(), null, 2);
+    }
+
+    function copyLogs() {
+        const text = diagnosticText();
+        GM_setClipboard(text, 'text');
+        debugLog('info', 'logs-copied', { entries: getLogs().length });
+        updateState({ message: `已复制 ${getLogs().length} 条诊断日志` });
+    }
+
+    function downloadLogs() {
+        const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `gdgbpx-helper-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        debugLog('info', 'logs-downloaded', { entries: getLogs().length });
+    }
+
+    function clearLogs() {
+        GM_setValue(LOG_KEY, []);
+        debugLog('info', 'logs-cleared');
+        updateState({ message: '诊断日志已清空' });
+    }
+
+    function updateLogCount() {
+        if (!panel || !document.contains(panel)) return;
+        const element = panel.querySelector('[data-role="log-count"]');
+        if (element) element.textContent = `日志：${getLogs().length}/${MAX_LOG_ENTRIES}`;
+    }
+
+    function updateBridgeStatus() {
+        if (!panel || !document.contains(panel)) return;
+        const element = panel.querySelector('[data-role="bridge-status"]');
+        if (!element) return;
+        element.textContent = bridgeConnected
+            ? '本机调试桥：已连接，日志自动保存'
+            : `本机调试桥：等待连接${bridgeQueue.length ? `（待传 ${bridgeQueue.length}）` : ''}`;
+        element.classList.toggle('connected', bridgeConnected);
+    }
+
+    function installGlobalErrorLogging() {
+        window.addEventListener('error', (event) => {
+            debugLog('error', 'window-error', {
+                message: event.message,
+                filename: String(event.filename || '').replace(/([?&]token=)[^&]*/gi, '$1[redacted]'),
+                line: event.lineno,
+                column: event.colno,
+                error: event.error
+            });
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+            debugLog('error', 'unhandled-rejection', { reason: event.reason });
+        });
+    }
+
+    function logDomSummary(name, detail) {
+        const summary = JSON.stringify(sanitizeLogValue(detail));
+        const key = `${name}:${summary}`;
+        if (key === lastDomSummary) return;
+        lastDomSummary = key;
+        debugLog('info', name, detail);
+    }
+
+    function normalizeText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isVisible(element) {
+        if (!element) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }
+
+    function uniqueAppend(list, value) {
+        return value && !list.includes(value) ? [...list, value] : list;
+    }
+
+    function isListRoute() {
+        if (!location.hash.includes('/workshop/workshopindex/classList')) return false;
+        const query = location.hash.includes('?') ? location.hash.split('?')[1] : '';
+        const classType = new URLSearchParams(query).get('classType');
+        if (classType) return classType === '3';
+        const activeMenu = document.querySelector('.el-menu-item.is-active');
+        return normalizeText(activeMenu?.textContent) === '在学';
+    }
+
+    function isAnyWorkshopListRoute() {
+        return location.hash.includes('/workshop/workshopindex/classList');
+    }
+
+    function currentClassType() {
+        const query = location.hash.includes('?') ? location.hash.split('?')[1] : '';
+        return new URLSearchParams(query).get('classType') || '';
+    }
+
+    function isDetailRoute() {
+        return location.hash.includes('/workshop/workshopindex/mergeClass');
+    }
+
+    function currentClassId() {
+        const query = location.hash.includes('?') ? location.hash.split('?')[1] : '';
+        return new URLSearchParams(query).get('classId') || '';
+    }
+
+    function getActivePageNumber() {
+        const active = document.querySelector('.el-pagination .el-pager .number.active');
+        const value = Number.parseInt(normalizeText(active?.textContent), 10);
+        return Number.isFinite(value) ? value : 1;
+    }
+
+    function initMainPage() {
+        if (window.top !== window) return;
+        debugLog('info', 'main-init', { hash: location.hash });
+        installPanel();
+        GM_registerMenuCommand('显示学习助手面板', () => {
+            installPanel(true);
+        });
+        GM_registerMenuCommand('清除学习助手状态', () => {
+            debugLog('warn', 'state-reset-from-menu');
+            GM_deleteValue(STATE_KEY);
+            location.reload();
+        });
+        GM_registerMenuCommand('复制诊断日志', copyLogs);
+        GM_registerMenuCommand('下载诊断日志', downloadLogs);
+        GM_registerMenuCommand('清空诊断日志', clearLogs);
+
+        GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
+            handlePlayerEvent(value);
+        });
+
+        window.addEventListener('hashchange', scheduleMainTick);
+        window.addEventListener('focus', () => {
+            const state = getState();
+            if (state.status === 'running' && ['opening-video', 'watching-video'].includes(state.phase)) {
+                updateState({ message: '播放器窗口已返回，等待完成信号或重新检查进度' });
+            }
+            scheduleMainTick();
+        });
+
+        const observer = new MutationObserver(scheduleMainTick);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        scheduleMainTick();
+        scheduleServerProgressMonitor();
+    }
+
+    function scheduleServerProgressMonitor() {
+        clearTimeout(serverProgressMonitorTimer);
+        serverProgressMonitorTimer = setTimeout(() => {
+            const state = getState();
+            if (state.status !== 'running' || !isDetailRoute() || !['opening-video', 'watching-video'].includes(state.phase)) return;
+            debugLog('info', 'server-progress-poll-reload', {
+                phase: state.phase,
+                lesson: state.currentLessonTitle,
+                intervalMs: SERVER_PROGRESS_POLL_MS
+            });
+            location.reload();
+        }, SERVER_PROGRESS_POLL_MS);
+    }
+
+    function installPanel(forceShow = false) {
+        if (panel && document.contains(panel)) {
+            if (forceShow) panel.style.display = 'block';
+            renderPanel(getState());
+            return;
+        }
+
+        GM_addStyle(`
+            #gbpx-helper-panel {
+                position: fixed; left: 0; bottom: 12px; z-index: 2147483646;
+                width: 330px; box-sizing: border-box; padding: 12px;
+                color: #222; background: rgba(255,255,255,.97);
+                border: 1px solid #d52b2b; border-radius: 8px;
+                box-shadow: 0 5px 24px rgba(0,0,0,.22); font: 14px/1.45 sans-serif;
+            }
+            #gbpx-helper-panel * { box-sizing: border-box; }
+            #gbpx-helper-panel .gbpx-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; cursor:move; touch-action:none; user-select:none; }
+            #gbpx-helper-panel .gbpx-title { color:#a40000; font-weight:700; }
+            #gbpx-helper-panel .gbpx-close { border:0; background:transparent; cursor:pointer; font-size:18px; }
+            #gbpx-helper-panel .gbpx-status { padding:8px; margin:6px 0; background:#f7f7f7; border-radius:5px; word-break:break-all; }
+            #gbpx-helper-panel .gbpx-meta { color:#666; font-size:12px; margin:3px 0; word-break:break-all; }
+            #gbpx-helper-panel .gbpx-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:10px 0; }
+            #gbpx-helper-panel button.gbpx-action { border:0; border-radius:4px; padding:7px 4px; color:#fff; cursor:pointer; background:#b30000; }
+            #gbpx-helper-panel button.gbpx-action.secondary { background:#666; }
+            #gbpx-helper-panel button.gbpx-action.warning { background:#e48300; }
+            #gbpx-helper-panel button.gbpx-action:disabled { opacity:.4; cursor:not-allowed; }
+            #gbpx-helper-panel .gbpx-settings { display:grid; grid-template-columns:auto 1fr; gap:7px 9px; align-items:center; border-top:1px solid #eee; padding-top:9px; }
+            #gbpx-helper-panel .gbpx-log-tools { display:grid; grid-template-columns:1fr repeat(3,auto); gap:5px; align-items:center; margin-top:9px; padding-top:8px; border-top:1px solid #eee; }
+            #gbpx-helper-panel .gbpx-log-tools button { border:1px solid #aaa; border-radius:4px; padding:4px 6px; color:#333; background:#fff; cursor:pointer; }
+            #gbpx-helper-panel .gbpx-log-tools button:hover { background:#f3f3f3; }
+            #gbpx-helper-panel .gbpx-log-count { color:#666; font-size:12px; }
+            #gbpx-helper-panel .gbpx-bridge-status { margin-top:5px; color:#9a6700; font-size:11px; }
+            #gbpx-helper-panel .gbpx-bridge-status.connected { color:#177245; }
+            #gbpx-helper-panel select { width:100%; padding:3px; }
+            #gbpx-helper-panel label { user-select:none; }
+        `);
+
+        panel = document.createElement('section');
+        panel.id = 'gbpx-helper-panel';
+        panel.innerHTML = `
+            <div class="gbpx-head">
+                <span class="gbpx-title">专题学习助手 v${VERSION}</span>
+                <button class="gbpx-close" type="button" title="隐藏面板">×</button>
+            </div>
+            <div class="gbpx-status" data-role="status"></div>
+            <div class="gbpx-meta" data-role="workshop"></div>
+            <div class="gbpx-meta" data-role="lesson"></div>
+            <div class="gbpx-buttons">
+                <button class="gbpx-action" data-action="start">开始</button>
+                <button class="gbpx-action secondary" data-action="pause">暂停</button>
+                <button class="gbpx-action" data-action="continue">继续</button>
+                <button class="gbpx-action warning" data-action="skip">跳过当前</button>
+                <button class="gbpx-action secondary" data-action="stop">停止</button>
+                <button class="gbpx-action secondary" data-action="recheck">重新检查</button>
+            </div>
+            <div class="gbpx-settings">
+                <label for="gbpx-muted">保持静音</label>
+                <input id="gbpx-muted" type="checkbox" data-setting="muted">
+                <label for="gbpx-resume">自动恢复暂停</label>
+                <input id="gbpx-resume" type="checkbox" data-setting="autoResume">
+                <span>无进度提醒</span>
+                <select data-setting="stallMinutes">
+                    <option value="2">2 分钟无进度</option>
+                    <option value="3">3 分钟无进度</option>
+                    <option value="5">5 分钟无进度</option>
+                </select>
+                <label for="gbpx-close-stall">卡死后自动重开</label>
+                <input id="gbpx-close-stall" type="checkbox" data-setting="closeOnStall">
+            </div>
+            <div class="gbpx-log-tools">
+                <span class="gbpx-log-count" data-role="log-count">日志：0/${MAX_LOG_ENTRIES}</span>
+                <button type="button" data-action="copylog">复制</button>
+                <button type="button" data-action="downloadlog">下载</button>
+                <button type="button" data-action="clearlog">清空</button>
+            </div>
+            <div class="gbpx-bridge-status" data-role="bridge-status">本机调试桥：等待连接</div>
+        `;
+        document.body.appendChild(panel);
+        restorePanelPosition();
+        enablePanelDragging();
+
+        panel.querySelector('.gbpx-close').addEventListener('click', () => {
+            panel.style.display = 'none';
+        });
+        panel.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-action]');
+            if (!button) return;
+            handlePanelAction(button.dataset.action);
+        });
+        panel.addEventListener('change', (event) => {
+            const name = event.target.dataset.setting;
+            if (!name) return;
+            let value = event.target.type === 'checkbox' ? event.target.checked : Number(event.target.value);
+            updateState({ settings: { [name]: value }, message: `设置已更新：${name}` });
+        });
+
+        renderPanel(getState());
+    }
+
+    function restorePanelPosition() {
+        const saved = GM_getValue(PANEL_POSITION_KEY, null);
+        if (!saved || !Number.isFinite(saved.left) || !Number.isFinite(saved.top)) return;
+        const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+        const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+        panel.style.left = `${Math.min(Math.max(0, saved.left), maxLeft)}px`;
+        panel.style.top = `${Math.min(Math.max(0, saved.top), maxTop)}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+    }
+
+    function enablePanelDragging() {
+        const handle = panel.querySelector('.gbpx-head');
+        let drag = null;
+
+        handle.addEventListener('pointerdown', (event) => {
+            if (event.target.closest('button')) return;
+            const rect = panel.getBoundingClientRect();
+            drag = { pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+            panel.style.left = `${rect.left}px`;
+            panel.style.top = `${rect.top}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            handle.setPointerCapture(event.pointerId);
+            event.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (event) => {
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+            const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+            const left = Math.min(Math.max(0, event.clientX - drag.offsetX), maxLeft);
+            const top = Math.min(Math.max(0, event.clientY - drag.offsetY), maxTop);
+            panel.style.left = `${left}px`;
+            panel.style.top = `${top}px`;
+        });
+
+        const finishDrag = (event) => {
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            const rect = panel.getBoundingClientRect();
+            const snapLeft = rect.left < 24 ? 0 : rect.left;
+            panel.style.left = `${snapLeft}px`;
+            GM_setValue(PANEL_POSITION_KEY, { left: snapLeft, top: rect.top });
+            drag = null;
+        };
+        handle.addEventListener('pointerup', finishDrag);
+        handle.addEventListener('pointercancel', finishDrag);
+
+        window.addEventListener('resize', () => {
+            const rect = panel.getBoundingClientRect();
+            const left = Math.min(Math.max(0, rect.left), Math.max(0, window.innerWidth - panel.offsetWidth));
+            const top = Math.min(Math.max(0, rect.top), Math.max(0, window.innerHeight - panel.offsetHeight));
+            panel.style.left = `${left}px`;
+            panel.style.top = `${top}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        });
+    }
+
+    function renderPanel(state = getState()) {
+        if (!panel || !document.contains(panel)) return;
+        const statusNames = {
+            idle: '未开始', running: '运行中', paused: '已暂停', stopped: '已停止', complete: '全部完成'
+        };
+        panel.querySelector('[data-role="status"]').textContent = `${statusNames[state.status] || state.status}：${state.message}`;
+        panel.querySelector('[data-role="workshop"]').textContent = state.currentWorkshopTitle
+            ? `专题：${state.currentWorkshopTitle}`
+            : `页面：${isListRoute() ? '在学列表' : isDetailRoute() ? '专题详情' : '其他页面'}`;
+        panel.querySelector('[data-role="lesson"]').textContent = state.currentLessonTitle
+            ? `课程：${state.currentLessonTitle}（${state.currentLessonProgress || 0}%）`
+            : `阶段：${state.phase}`;
+
+        panel.querySelector('[data-setting="muted"]').checked = Boolean(state.settings.muted);
+        panel.querySelector('[data-setting="autoResume"]').checked = Boolean(state.settings.autoResume);
+        panel.querySelector('[data-setting="stallMinutes"]').value = String(state.settings.stallMinutes);
+        panel.querySelector('[data-setting="closeOnStall"]').checked = Boolean(state.settings.closeOnStall);
+
+        panel.querySelector('[data-action="pause"]').disabled = state.status !== 'running';
+        panel.querySelector('[data-action="continue"]').disabled = state.status !== 'paused';
+        panel.querySelector('[data-action="skip"]').disabled = !state.currentLessonTitle || !['running', 'paused'].includes(state.status);
+        panel.querySelector('[data-action="stop"]').disabled = !['running', 'paused'].includes(state.status);
+        updateLogCount();
+        updateBridgeStatus();
+    }
+
+    function handlePanelAction(action) {
+        const state = getState();
+        debugLog('info', 'panel-action', { action, status: state.status, phase: state.phase });
+        if (action === 'copylog') {
+            copyLogs();
+            return;
+        }
+        if (action === 'downloadlog') {
+            downloadLogs();
+            return;
+        }
+        if (action === 'clearlog') {
+            clearLogs();
+            return;
+        }
+        if (action === 'start') {
+            if (!isListRoute() && !isDetailRoute()) {
+                updateState({ message: '请先手动进入“专题学习 → 在学”页面' });
+                return;
+            }
+            const freshRun = ['idle', 'stopped', 'complete'].includes(state.status);
+            const resetSkipped = freshRun || state.phase === 'all-unfinished-skipped';
+            updateState({
+                status: 'running',
+                phase: isListRoute() ? 'list-ready' : 'detail-ready',
+                message: '已启动，正在读取当前页面',
+                lastActionAt: 0,
+                refreshAttempts: 0,
+                currentLessonTitle: freshRun ? '' : state.currentLessonTitle,
+                currentLessonKey: freshRun ? '' : state.currentLessonKey,
+                finishedWorkshopTitles: freshRun ? [] : state.finishedWorkshopTitles,
+                skippedLessonKeys: resetSkipped ? [] : state.skippedLessonKeys,
+                skipRequestAt: 0,
+                stopRequestAt: 0,
+                completedCloseRequestAt: 0,
+                completedCloseAttempts: 0,
+                openAttempts: 0
+            });
+            scheduleMainTick();
+            return;
+        }
+
+        if (action === 'pause') {
+            updateState({ status: 'paused', message: '已暂停；播放器会暂停，点击“继续”恢复' });
+            return;
+        }
+        if (action === 'continue') {
+            const retryPlayerOpen = state.phase === 'player-open-failed' && isDetailRoute();
+            const continueAfterManualClose = state.phase === 'completed-close-failed' && isDetailRoute();
+            const recheckUnverifiedCompletion = state.phase === 'completion-unverified' && isDetailRoute();
+            updateState({
+                status: 'running',
+                phase: retryPlayerOpen || continueAfterManualClose
+                    ? 'detail-ready'
+                    : recheckUnverifiedCompletion
+                        ? 'checking-progress'
+                        : state.phase,
+                openAttempts: 0,
+                currentLessonTitle: continueAfterManualClose ? '' : state.currentLessonTitle,
+                currentLessonKey: continueAfterManualClose ? '' : state.currentLessonKey,
+                completedCloseRequestAt: 0,
+                completedCloseAttempts: 0,
+                message: '继续运行'
+            });
+            if (retryPlayerOpen && openCurrentLessonFromUserGesture()) return;
+            if (recheckUnverifiedCompletion) {
+                location.reload();
+                return;
+            }
+            scheduleMainTick();
+            return;
+        }
+        if (action === 'stop') {
+            updateState({
+                status: 'stopped', phase: 'stopped', message: '已停止', stopRequestAt: Date.now()
+            });
+            return;
+        }
+        if (action === 'skip') {
+            if (!state.currentLessonKey) return;
+            updateState({
+                status: 'running',
+                phase: 'closing-player',
+                skippedLessonKeys: uniqueAppend(state.skippedLessonKeys, state.currentLessonKey),
+                skipRequestAt: Date.now(),
+                completedCloseRequestAt: 0,
+                completedCloseAttempts: 0,
+                message: `本轮跳过：${state.currentLessonTitle}`,
+                currentLessonTitle: '',
+                currentLessonKey: '',
+                refreshAttempts: 0
+            });
+            setTimeout(scheduleMainTick, 1500);
+            return;
+        }
+        if (action === 'recheck') {
+            updateState({
+                status: state.status === 'paused' ? 'paused' : 'running',
+                phase: isDetailRoute() ? 'checking-progress' : 'list-ready',
+                message: '重新加载并检查服务器进度',
+                refreshAttempts: 0
+            });
+            location.reload();
+        }
+    }
+
+    function scheduleMainTick() {
+        clearTimeout(mainTickTimer);
+        mainTickTimer = setTimeout(mainTick, 250);
+    }
+
+    function mainTick() {
+        renderPanel(getState());
+        const state = getState();
+        if (state.status !== 'running') return;
+
+        if (isListRoute()) {
+            handleListPage(state);
+        } else if (isDetailRoute()) {
+            handleDetailPage(state);
+        } else if (isAnyWorkshopListRoute()) {
+            logDomSummary('non-studying-list-ignored', { classType: currentClassType(), hash: location.hash });
+            updateState({
+                phase: 'waiting-studying-list',
+                message: `当前列表 classType=${currentClassType() || '未知'}，不会按“在学”列表处理`
+            });
+        } else {
+            updateState({ message: '等待用户进入“专题学习 → 在学”' });
+        }
+        clearTimeout(mainTickTimer);
+        mainTickTimer = setTimeout(mainTick, TICK_MS);
+    }
+
+    function handleListPage(state) {
+        const list = document.querySelector('.content-div .list_box');
+        if (!list) {
+            emptyStudyingListSeenAt = 0;
+            logDomSummary('list-waiting', { hasContentDiv: Boolean(document.querySelector('.content-div')) });
+            updateState({ phase: 'list-loading', message: '等待“在学”课程列表加载' });
+            return;
+        }
+
+        const page = getActivePageNumber();
+        const cards = [...list.querySelectorAll(':scope > .item_box')].map((box) => {
+            const item = box.querySelector('.list_item') || box;
+            return {
+                box,
+                title: normalizeText(item.querySelector('.title')?.textContent),
+                button: item.querySelector('button.item_enter_button, button#enter_button')
+            };
+        }).filter((card) => card.title && card.button);
+
+        if (!cards.length) {
+            const loading = [...document.querySelectorAll('.el-loading-mask')].some(isVisible);
+            if (!emptyStudyingListSeenAt) emptyStudyingListSeenAt = Date.now();
+            const emptyForMs = Date.now() - emptyStudyingListSeenAt;
+            logDomSummary('studying-list-empty-pending', { page, loading, emptyForMs });
+            if (loading || emptyForMs < 8000) {
+                updateState({
+                    phase: 'list-loading',
+                    message: `“在学”列表暂时为空，等待加载确认（${Math.ceil((8000 - emptyForMs) / 1000)} 秒）`
+                });
+                return;
+            }
+        } else {
+            emptyStudyingListSeenAt = 0;
+        }
+
+        logDomSummary('list-read', {
+            page,
+            cardCount: cards.length,
+            titles: cards.map((card) => card.title),
+            nextEnabled: Boolean(document.querySelector('.el-pagination .btn-next:not([disabled])'))
+        });
+
+        const nextCard = cards.find((card) => !state.finishedWorkshopTitles.includes(card.title));
+        if (nextCard) {
+            if (state.phase === 'entering-workshop' && Date.now() - state.lastActionAt < 20000) return;
+            updateState({
+                phase: 'entering-workshop',
+                message: `进入第 ${page} 页专题`,
+                currentPage: page,
+                currentWorkshopTitle: nextCard.title,
+                currentClassId: '',
+                currentLessonTitle: '',
+                currentLessonKey: '',
+                currentLessonProgress: 0,
+                skippedLessonKeys: [],
+                lastActionAt: Date.now()
+            });
+            debugLog('info', 'workshop-open-click', { page, title: nextCard.title });
+            nextCard.button.click();
+            return;
+        }
+
+        const nextButton = document.querySelector('.el-pagination .btn-next:not([disabled])');
+        if (nextButton) {
+            if (state.phase === 'changing-page' && Date.now() - state.lastActionAt < 5000) return;
+            updateState({ phase: 'changing-page', message: `第 ${page} 页已处理，前往下一页`, lastActionAt: Date.now() });
+            debugLog('info', 'pagination-next-click', { fromPage: page });
+            nextButton.click();
+            return;
+        }
+
+        updateState({
+            status: 'complete', phase: 'complete', message: '“在学”列表中已没有待处理专题',
+            currentWorkshopTitle: '', currentLessonTitle: '', currentLessonKey: ''
+        });
+        debugLog('info', 'studying-list-processing-complete', {
+            page,
+            emptyCardList: cards.length === 0,
+            stableEmptyMs: cards.length === 0 ? Date.now() - emptyStudyingListSeenAt : 0
+        });
+    }
+
+    function readLessons() {
+        return [...document.querySelectorAll('#pane-required .item_box')].map((box, index) => {
+            const titleElement = box.querySelector('.item_title');
+            const progressElement = box.querySelector('[role="progressbar"][aria-valuenow]');
+            const progress = Number.parseFloat(progressElement?.getAttribute('aria-valuenow') || '0');
+            const status = normalizeText(box.querySelector('.item_status')?.textContent);
+            const title = normalizeText(titleElement?.textContent);
+            return {
+                index,
+                box,
+                titleElement,
+                title,
+                progress: Number.isFinite(progress) ? progress : 0,
+                status,
+                // This site marks completion independently of the position bar (for
+                // example, 95.68% can already be shown as 已完成). Use the explicit
+                // server status only; percentage is diagnostic data, not a gate.
+                complete: status.includes('已完成')
+            };
+        }).filter((lesson) => lesson.title && lesson.titleElement);
+    }
+
+    function lessonKey(classId, title) {
+        return `${classId || 'unknown'}::${title}`;
+    }
+
+    function openCurrentLessonFromUserGesture() {
+        const state = getState();
+        if (!isDetailRoute() || !state.currentLessonTitle) return false;
+        const lesson = readLessons().find((item) => item.title === state.currentLessonTitle);
+        if (!lesson?.titleElement) {
+            debugLog('warn', 'user-gesture-open-target-missing', { lesson: state.currentLessonTitle });
+            return false;
+        }
+        updateState({
+            phase: 'opening-video',
+            message: '正在通过“继续”的用户点击重新打开播放器',
+            lastActionAt: Date.now(),
+            openAttempts: 0
+        });
+        debugLog('info', 'lesson-open-user-gesture', { title: lesson.title, index: lesson.index });
+        lesson.titleElement.scrollIntoView({ block: 'center', behavior: 'auto' });
+        lesson.titleElement.click();
+        return true;
+    }
+
+    function handleDetailPage(state) {
+        const lessons = readLessons();
+        if (!lessons.length) {
+            logDomSummary('detail-waiting', {
+                hasRequiredPane: Boolean(document.querySelector('#pane-required')),
+                itemBoxes: document.querySelectorAll('#pane-required .item_box').length
+            });
+            updateState({ phase: 'detail-loading', message: '等待必修课程列表加载' });
+            return;
+        }
+
+        const classId = currentClassId();
+        if (state.phase === 'detail-ready' && state.lastActionAt && Date.now() - state.lastActionAt < PLAYER_REOPEN_COOLDOWN_MS) {
+            return;
+        }
+        logDomSummary('detail-read', {
+            classId,
+            lessonCount: lessons.length,
+            completeCount: lessons.filter((lesson) => lesson.complete).length,
+            lessons: lessons.map((lesson) => ({ title: lesson.title, progress: lesson.progress, status: lesson.status }))
+        });
+        if (state.currentClassId !== classId) {
+            state = updateState({ currentClassId: classId, phase: 'detail-ready', message: `已读取 ${lessons.length} 个必修课程` });
+        }
+
+        const currentLesson = lessons.find((lesson) => lesson.title === state.currentLessonTitle);
+        if (currentLesson && state.currentLessonTitle && state.currentLessonProgress !== currentLesson.progress) {
+            state = updateState({
+                currentLessonProgress: currentLesson.progress
+            });
+            debugLog('info', 'panel-progress-synced-from-detail', {
+                lesson: currentLesson.title,
+                progress: currentLesson.progress,
+                status: currentLesson.status
+            });
+        }
+        if (currentLesson && state.currentLessonTitle) {
+            const currentKey = lessonKey(classId, currentLesson.title);
+            if (currentKey !== lastAutoScrolledLessonKey) {
+                lastAutoScrolledLessonKey = currentKey;
+                currentLesson.titleElement.scrollIntoView({ block: 'center', behavior: 'auto' });
+                debugLog('info', 'current-lesson-auto-scrolled', {
+                    lesson: currentLesson.title,
+                    progress: currentLesson.progress,
+                    status: currentLesson.status
+                });
+            }
+        }
+        // The detail page is the server-side source of truth. A polling refresh can
+        // confirm 100% even before the player emits its final ended event.
+        if (state.phase === 'watching-video' && currentLesson?.complete) {
+            updateState({
+                phase: 'closing-completed-player',
+                message: `服务器已确认完成：${currentLesson.title}；正在关闭播放器`,
+                currentLessonProgress: currentLesson.progress,
+                refreshAttempts: 0,
+                lastActionAt: Date.now(),
+                completedCloseRequestAt: Date.now(),
+                completedCloseAttempts: 1
+            });
+            debugLog('info', 'server-progress-poll-confirmed-completion', {
+                lesson: currentLesson.title,
+                progress: currentLesson.progress
+            });
+            return;
+        }
+        if (state.phase === 'checking-progress' || state.phase === 'refresh-delay') {
+            if (!currentLesson) {
+                updateState({
+                    status: 'paused',
+                    phase: 'completion-unverified',
+                    message: '刷新后找不到当前课程，无法确认完成状态；请检查后点“重新检查”',
+                    refreshAttempts: 0
+                });
+                debugLog('warn', 'current-lesson-missing-before-completion-confirmation', {
+                    lesson: state.currentLessonTitle,
+                    lessonKey: state.currentLessonKey
+                });
+                return;
+            } else if (currentLesson.complete) {
+                // A media ended event is not proof of completion. The refreshed detail
+                // page must confirm completion before the player receives a close request.
+                state = updateState({
+                    phase: 'closing-completed-player',
+                    message: `服务器已确认完成：${currentLesson.title}；正在关闭播放器`,
+                    currentLessonProgress: currentLesson.progress,
+                    refreshAttempts: 0,
+                    lastActionAt: Date.now(),
+                    completedCloseRequestAt: Date.now(),
+                    completedCloseAttempts: 1
+                });
+                debugLog('info', 'server-completion-confirmed-close-requested', {
+                    lesson: currentLesson.title,
+                    progress: currentLesson.progress
+                });
+            } else if (!currentLesson) {
+                state = updateState({
+                    phase: 'detail-ready',
+                    message: currentLesson ? `已完成：${currentLesson.title}` : '重新读取课程列表',
+                    currentLessonTitle: '', currentLessonKey: '', currentLessonProgress: currentLesson?.progress || 100,
+                    refreshAttempts: 0, lastActionAt: 0
+                });
+            } else if (state.refreshAttempts < MAX_PROGRESS_REFRESHES) {
+                if (state.phase === 'refresh-delay' && Date.now() - state.lastActionAt < 6500) return;
+                const attempt = state.refreshAttempts + 1;
+                updateState({
+                    phase: 'refresh-delay',
+                    message: `服务器进度尚未更新，${attempt}/${MAX_PROGRESS_REFRESHES} 次复查`,
+                    currentLessonProgress: currentLesson.progress,
+                    refreshAttempts: attempt,
+                    lastActionAt: Date.now()
+                });
+                clearTimeout(detailRefreshTimer);
+                debugLog('info', 'detail-refresh-scheduled', { attempt, delayMs: 6500, progress: currentLesson.progress });
+                detailRefreshTimer = setTimeout(() => location.reload(), 6500);
+                return;
+            } else {
+                state = updateState({
+                    status: 'paused',
+                    phase: 'completion-pending',
+                    message: `进度仍为 ${currentLesson.progress}%，将重新打开当前课程`,
+                    currentLessonProgress: currentLesson.progress,
+                    refreshAttempts: 0,
+                    lastActionAt: 0
+                });
+                updateState({
+                    message: `服务器尚未确认完成（当前 ${currentLesson.progress}%）；播放器保持打开，请稍后点“重新检查”`
+                });
+                debugLog('warn', 'server-completion-not-confirmed', {
+                    lesson: currentLesson.title,
+                    progress: currentLesson.progress,
+                    attempts: MAX_PROGRESS_REFRESHES
+                });
+                return;
+            }
+        }
+
+        if (['opening-video', 'watching-video', 'closing-player', 'awaiting-detail-refresh', 'closing-completed-player'].includes(state.phase)) {
+            const age = Date.now() - state.lastActionAt;
+            if (state.phase === 'closing-completed-player' && age > COMPLETED_CLOSE_RETRY_MS && Number(state.completedCloseAttempts || 1) < MAX_COMPLETED_CLOSE_RETRIES) {
+                const attempts = Number(state.completedCloseAttempts || 1) + 1;
+                const requestAt = Date.now();
+                updateState({
+                    lastActionAt: requestAt,
+                    completedCloseRequestAt: requestAt,
+                    completedCloseAttempts: attempts,
+                    message: `服务器已确认完成，正在重试关闭播放器 (${attempts}/${MAX_COMPLETED_CLOSE_RETRIES})`
+                });
+                debugLog('warn', 'completed-player-close-retry', {
+                    lesson: state.currentLessonTitle,
+                    attempt: attempts,
+                    waitedMs: age
+                });
+                return;
+            }
+            if (state.phase === 'closing-completed-player' && age > COMPLETED_CLOSE_GRACE_MS) {
+                updateState({
+                    status: 'paused',
+                    phase: 'completed-close-failed',
+                    message: '服务器已确认课程完成，但播放器未确认关闭；请手动关闭播放器后点“继续”',
+                    completedCloseRequestAt: 0
+                });
+                debugLog('warn', 'completed-player-close-not-confirmed', {
+                    lesson: state.currentLessonTitle,
+                    waitedMs: age
+                });
+                return;
+            }
+            if (state.phase === 'opening-video' && age > 30000) {
+                const attempts = Number(state.openAttempts || 0) + 1;
+                if (attempts >= 3) {
+                    updateState({
+                        status: 'paused',
+                        phase: 'player-open-failed',
+                        openAttempts: attempts,
+                        message: '播放器连续 3 次未启动，已暂停以避免无限重试；确认浏览器允许弹窗后点击“继续”'
+                    });
+                    debugLog('warn', 'player-open-retries-exhausted', {
+                        lesson: state.currentLessonTitle,
+                        attempts
+                    });
+                } else {
+                    updateState({
+                        phase: 'detail-ready',
+                        openAttempts: attempts,
+                        message: `未检测到播放器启动，准备第 ${attempts + 1} 次尝试`,
+                        lastActionAt: 0
+                    });
+                }
+            }
+            return;
+        }
+
+        const unfinished = lessons.filter((lesson) => !lesson.complete);
+        if (!unfinished.length) {
+            const title = state.currentWorkshopTitle || `classId:${classId}`;
+            updateState({
+                phase: 'returning-list',
+                message: `专题必修课已全部完成，返回“在学”`,
+                finishedWorkshopTitles: uniqueAppend(state.finishedWorkshopTitles, title),
+                currentLessonTitle: '', currentLessonKey: '', refreshAttempts: 0,
+                lastActionAt: Date.now()
+            });
+            debugLog('info', 'workshop-all-lessons-complete', { classId, lessonCount: lessons.length });
+            returnToStudyingList();
+            return;
+        }
+
+        const nextLesson = unfinished.find((lesson) => {
+            return !state.skippedLessonKeys.includes(lessonKey(classId, lesson.title));
+        });
+        if (!nextLesson) {
+            updateState({
+                status: 'paused', phase: 'all-unfinished-skipped',
+                message: '当前专题剩余未完成课程均已被本轮跳过；点击“开始”可清除跳过记录重试'
+            });
+            return;
+        }
+
+        const key = lessonKey(classId, nextLesson.title);
+        updateState({
+            phase: 'opening-video',
+            message: `打开必修 ${nextLesson.index + 1}/${lessons.length}`,
+            currentLessonTitle: nextLesson.title,
+            currentLessonKey: key,
+            currentLessonProgress: nextLesson.progress,
+            beforeProgress: nextLesson.progress,
+            lastActionAt: Date.now(),
+            refreshAttempts: 0,
+            openAttempts: state.currentLessonKey === key ? Number(state.openAttempts || 0) : 0
+        });
+        debugLog('info', 'lesson-open-click', {
+            classId,
+            index: nextLesson.index,
+            title: nextLesson.title,
+            progress: nextLesson.progress
+        });
+        nextLesson.titleElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setTimeout(() => nextLesson.titleElement.click(), 350);
+    }
+
+    function returnToStudyingList() {
+        const menuItems = [...document.querySelectorAll('.el-menu-item')];
+        const studying = menuItems.find((item) => normalizeText(item.textContent) === '在学');
+        if (studying) {
+            studying.click();
+            setTimeout(() => {
+                if (isDetailRoute()) location.hash = '#/workshop/workshopindex/classList?classType=3';
+            }, 2500);
+        } else {
+            location.hash = '#/workshop/workshopindex/classList?classType=3';
+        }
+    }
+
+    function handlePlayerEvent(event) {
+        if (!event || !event.id || event.id === lastHandledEventId) return;
+        lastHandledEventId = event.id;
+        const state = getState();
+        debugLog('info', 'player-event-received', { event, status: state.status, phase: state.phase });
+
+        if (event.lessonKey && state.currentLessonKey && event.lessonKey !== state.currentLessonKey) {
+            debugLog('warn', 'stale-player-event-ignored', {
+                type: event.type,
+                eventLessonKey: event.lessonKey,
+                currentLessonKey: state.currentLessonKey,
+                currentLessonTitle: state.currentLessonTitle
+            });
+            return;
+        }
+
+        if (event.type === 'video-started' && state.status === 'running') {
+            if (state.phase === 'closing-completed-player') {
+                debugLog('info', 'completion-close-ignores-video-start', { lessonKey: event.lessonKey });
+                return;
+            }
+            updateState({
+                phase: 'watching-video',
+                message: `播放器已开始（${event.rate || state.settings.playbackRate}×）`,
+                lastActionAt: Date.now(),
+                openAttempts: 0
+            });
+            return;
+        }
+
+        if (event.type === 'video-progress' && state.status === 'running') {
+            if (state.phase === 'closing-completed-player') {
+                debugLog('info', 'completion-close-ignores-video-progress', {
+                    lessonKey: event.lessonKey,
+                    currentTime: event.currentTime,
+                    duration: event.duration
+                });
+                return;
+            }
+            updateState({
+                phase: 'watching-video',
+                message: `播放中：${formatClock(event.currentTime)} / ${formatClock(event.duration)}，${event.rate || 1}×`,
+                lastActionAt: Date.now()
+            });
+            return;
+        }
+
+        if (event.type === 'manual-question') {
+            updateState({ message: '播放器检测到课程提问，请在播放器窗口中手动完成' });
+            return;
+        }
+
+        if (event.type === 'video-stall-warning' && state.status === 'running') {
+            if (state.phase === 'closing-completed-player') return;
+            updateState({
+                phase: 'watching-video',
+                message: `播放器已有 ${event.minutes || state.settings.stallMinutes} 分钟无进度，保持窗口并继续尝试恢复`,
+                lastActionAt: Date.now()
+            });
+            return;
+        }
+
+        if (event.type === 'video-closed' && state.status === 'running' && state.phase === 'closing-completed-player') {
+            clearTimeout(detailRefreshTimer);
+            updateState({
+                phase: 'detail-ready',
+                message: '已确认播放器关闭，准备下一节',
+                currentLessonTitle: '',
+                currentLessonKey: '',
+                currentLessonProgress: 100,
+                refreshAttempts: 0,
+                completedCloseRequestAt: 0,
+                completedCloseAttempts: 0,
+                lastActionAt: Date.now()
+            });
+            debugLog('info', 'completed-player-close-confirmed', { lessonKey: event.lessonKey });
+            setTimeout(scheduleMainTick, PLAYER_REOPEN_COOLDOWN_MS);
+            return;
+        }
+
+        if (state.phase === 'closing-completed-player' && event.type !== 'video-closed') {
+            debugLog('info', 'completion-close-ignores-player-event', {
+                type: event.type,
+                lessonKey: event.lessonKey
+            });
+            return;
+        }
+
+        if (['video-ended', 'video-closed', 'video-stalled'].includes(event.type) && state.status === 'running') {
+            const reason = event.type === 'video-ended'
+                ? '视频已结束'
+                : event.type === 'video-stalled'
+                    ? '播放器长时间无进度，已关闭并准备重试'
+                    : '播放器窗口已关闭';
+            updateState({
+                phase: 'awaiting-detail-refresh',
+                message: `${reason}，等待服务器保存进度`,
+                lastActionAt: Date.now(),
+                skipRequestAt: 0
+            });
+            clearTimeout(detailRefreshTimer);
+            detailRefreshTimer = setTimeout(() => {
+                const latest = getState();
+                if (latest.status !== 'running' || !isDetailRoute()) return;
+                updateState({ phase: 'checking-progress', message: '刷新专题详情并检查完成状态', lastActionAt: Date.now() });
+                location.reload();
+            }, DETAIL_REFRESH_DELAY_MS);
+        }
+    }
+
+    function formatClock(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
+        const whole = Math.floor(seconds);
+        const minutes = Math.floor(whole / 60);
+        const secs = String(whole % 60).padStart(2, '0');
+        return `${minutes}:${secs}`;
+    }
+
+    function initPlayerPage() {
+        const initialState = getState();
+        playerLessonKey = initialState.currentLessonKey || '';
+        debugLog('info', 'player-init', {
+            topLevel: window.top === window,
+            readyState: document.readyState,
+            lessonKey: playerLessonKey,
+            lessonTitle: initialState.currentLessonTitle,
+            beforeProgress: initialState.beforeProgress,
+            currentLessonProgress: initialState.currentLessonProgress
+        });
+        GM_addValueChangeListener(STATE_KEY, (_name, _oldValue, value) => {
+            applyPlayerState(value ? getState() : defaultState());
+        });
+
+        if (window.top === window) {
+            window.addEventListener('beforeunload', () => {
+                const state = getState();
+                if (['running', 'paused'].includes(state.status)) {
+                    publishEvent('video-closed');
+                }
+            });
+            const layerObserver = new MutationObserver(() => {
+                const ending = [...document.querySelectorAll('.layui-layer-content')]
+                    .find((node) => normalizeText(node.textContent).includes('视频即将结束'));
+                if (ending && !playerEndedPublished) {
+                    playerEndedPublished = true;
+                    debugLog('info', 'player-ending-dialog-detected', { text: normalizeText(ending.textContent) });
+                    publishEvent('video-ended');
+                }
+            });
+            layerObserver.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+        }
+
+        playerTimer = setInterval(playerTick, 1000);
+        playerTick();
+    }
+
+    function playerTick() {
+        const state = getState();
+        dismissKnownContinuePrompt();
+        const video = document.querySelector('video');
+        if (video && video !== playerVideo) attachVideo(video);
+
+        if (state.stopRequestAt || state.skipRequestAt || state.completedCloseRequestAt) {
+            const requestAt = Math.max(
+                state.stopRequestAt || 0,
+                state.skipRequestAt || 0,
+                state.completedCloseRequestAt || 0
+            );
+            const handledAt = Number(sessionStorage.getItem('gbpxHandledCloseRequest') || 0);
+            if (requestAt > handledAt) {
+                sessionStorage.setItem('gbpxHandledCloseRequest', String(requestAt));
+                const reason = requestAt === state.completedCloseRequestAt
+                    ? 'server-completion-confirmed'
+                    : state.stopRequestAt >= state.skipRequestAt
+                        ? 'stop-request'
+                        : 'skip-request';
+                debugLog('info', 'player-close-request', {
+                    requestAt,
+                    stop: state.stopRequestAt,
+                    skip: state.skipRequestAt,
+                    completed: state.completedCloseRequestAt,
+                    reason
+                });
+                closePlayerWindow(reason);
+                return;
+            }
+        }
+
+        if (!playerVideo) return;
+        applyPlayerState(state);
+        recoverIncompleteEndPosition(playerVideo, state);
+
+        const source = playerVideo.currentSrc || playerVideo.getAttribute('src') || '';
+        if (source !== playerSource) {
+            playerSource = source;
+            playerPlaybackStarted = false;
+            lastPlayerTime = Number(playerVideo.currentTime || 0);
+            lastPlayerProgressAt = Date.now();
+            lastPlayAttemptAt = 0;
+            debugLog('info', 'player-source-changed', {
+                hasSource: Boolean(source),
+                source: source.slice(0, 500),
+                readyState: playerVideo.readyState,
+                networkState: playerVideo.networkState,
+                duration: Number(playerVideo.duration || 0)
+            });
+        }
+
+        const current = Number(playerVideo.currentTime || 0);
+        if (current > lastPlayerTime + 0.2) {
+            lastPlayerTime = current;
+            lastPlayerProgressAt = Date.now();
+        }
+
+        const hasQuestion = hasBlockingQuestion();
+        if (hasQuestion) {
+            if (Date.now() - lastPlayerReportAt > 5000) {
+                lastPlayerReportAt = Date.now();
+                publishEvent('manual-question');
+            }
+            return;
+        }
+
+        if (state.status === 'running' && state.settings.autoResume && playerVideo.paused && !playerVideo.ended) {
+            attemptPlayerStart(playerVideo);
+        }
+
+        const stallMs = Math.max(2, Number(state.settings.stallMinutes) || 3) * 60 * 1000;
+        const shouldWatchForStall = playerPlaybackStarted && (!playerVideo.paused || state.settings.autoResume);
+        if (state.status === 'running' && shouldWatchForStall && !playerVideo.ended && Date.now() - lastPlayerProgressAt > stallMs) {
+            debugLog('warn', 'player-stall-timeout', {
+                currentTime: current,
+                duration: Number(playerVideo.duration || 0),
+                readyState: playerVideo.readyState,
+                networkState: playerVideo.networkState,
+                waitedMs: Date.now() - lastPlayerProgressAt,
+                closeOnStall: Boolean(state.settings.closeOnStall)
+            });
+            lastPlayerProgressAt = Date.now();
+            if (state.settings.closeOnStall) {
+                publishEvent('video-stalled', { currentTime: current, duration: Number(playerVideo.duration || 0) });
+                closePlayerWindow('stall-auto-reopen');
+            } else {
+                publishEvent('video-stall-warning', {
+                    currentTime: current,
+                    duration: Number(playerVideo.duration || 0),
+                    minutes: Math.round(stallMs / 60000)
+                });
+                lastPlayAttemptAt = 0;
+                attemptPlayerStart(playerVideo);
+            }
+        }
+    }
+
+    function attachVideo(video) {
+        playerVideo = video;
+        if (!playerLessonKey) playerLessonKey = getState().currentLessonKey || '';
+        lastPlayerTime = Number(video.currentTime || 0);
+        lastPlayerProgressAt = Date.now();
+        debugLog('info', 'video-attached', {
+            id: video.id,
+            readyState: video.readyState,
+            networkState: video.networkState,
+            hasSource: Boolean(video.currentSrc || video.getAttribute('src'))
+        });
+
+        video.addEventListener('play', () => {
+            playerPlaybackStarted = true;
+            const state = getState();
+            applyPlayerState(state);
+            publishEvent('video-started', { rate: video.playbackRate });
+        });
+        video.addEventListener('playing', () => {
+            debugLog('info', 'video-playing', {
+                currentTime: Number(video.currentTime || 0),
+                duration: Number(video.duration || 0),
+                rate: Number(video.playbackRate || 1)
+            });
+        });
+        video.addEventListener('pause', () => {
+            debugLog('info', 'video-paused', {
+                currentTime: Number(video.currentTime || 0),
+                ended: video.ended,
+                readyState: video.readyState
+            });
+        });
+        video.addEventListener('waiting', () => {
+            debugLog('warn', 'video-waiting', {
+                currentTime: Number(video.currentTime || 0),
+                readyState: video.readyState,
+                networkState: video.networkState
+            });
+        });
+        video.addEventListener('stalled', () => {
+            debugLog('warn', 'video-native-stalled', {
+                currentTime: Number(video.currentTime || 0),
+                readyState: video.readyState,
+                networkState: video.networkState
+            });
+        });
+        video.addEventListener('error', () => {
+            debugLog('error', 'video-error', {
+                code: video.error?.code,
+                message: video.error?.message,
+                currentSrc: String(video.currentSrc || '').slice(0, 500),
+                readyState: video.readyState,
+                networkState: video.networkState
+            });
+        });
+        video.addEventListener('timeupdate', () => {
+            if (Date.now() - lastPlayerReportAt < 15000) return;
+            lastPlayerReportAt = Date.now();
+            publishEvent('video-progress', {
+                currentTime: Number(video.currentTime || 0),
+                duration: Number(video.duration || 0),
+                rate: Number(video.playbackRate || 1)
+            });
+        });
+        video.addEventListener('ended', () => {
+            const state = getState();
+            if (recoverIncompleteEndPosition(video, state)) {
+                debugLog('warn', 'ended-recovered-as-incomplete', {
+                    lessonKey: playerLessonKey,
+                    beforeProgress: state.beforeProgress,
+                    currentLessonProgress: state.currentLessonProgress
+                });
+                setTimeout(() => attemptPlayerStart(video), 100);
+                return;
+            }
+            playerEndedPublished = true;
+            publishEvent('video-ended', {
+                currentTime: Number(video.currentTime || 0), duration: Number(video.duration || 0)
+            });
+        });
+        video.addEventListener('loadedmetadata', () => {
+            debugLog('info', 'video-loadedmetadata', {
+                duration: Number(video.duration || 0),
+                currentTime: Number(video.currentTime || 0),
+                readyState: video.readyState
+            });
+            recoverIncompleteEndPosition(video, getState());
+            attemptPlayerStart(video);
+        });
+        video.addEventListener('canplay', () => {
+            debugLog('info', 'video-canplay', {
+                duration: Number(video.duration || 0),
+                currentTime: Number(video.currentTime || 0),
+                readyState: video.readyState
+            });
+            recoverIncompleteEndPosition(video, getState());
+            attemptPlayerStart(video);
+        });
+        applyPlayerState(getState());
+    }
+
+    function attemptPlayerStart(video) {
+        const state = getState();
+        if (state.status !== 'running' || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
+        const source = video.currentSrc || video.getAttribute('src') || '';
+        const durationReady = Number.isFinite(video.duration) && video.duration > 0;
+        const metadataReady = video.readyState >= 1 && durationReady;
+        if (!source || !metadataReady) {
+            if (Date.now() - lastPlayerWaitLogAt >= 10000) {
+                lastPlayerWaitLogAt = Date.now();
+                debugLog('warn', 'player-not-ready', {
+                    hasSource: Boolean(source),
+                    duration: Number(video.duration || 0),
+                    readyState: video.readyState,
+                    networkState: video.networkState
+                });
+            }
+            return;
+        }
+        if (Date.now() - lastPlayAttemptAt < 3000) return;
+
+        lastPlayAttemptAt = Date.now();
+        applyPlayerState(state);
+        const bigPlayButton = document.querySelector('.vjs-big-play-button');
+        debugLog('info', 'player-start-attempt', {
+            bigPlayButtonVisible: isVisible(bigPlayButton),
+            paused: video.paused,
+            duration: Number(video.duration || 0),
+            readyState: video.readyState,
+            rate: video.playbackRate
+        });
+        if (bigPlayButton && isVisible(bigPlayButton)) bigPlayButton.click();
+        setTimeout(() => {
+            if (video.paused && !video.ended && !hasBlockingQuestion()) {
+                video.play().catch((error) => {
+                    debugLog('warn', 'video-play-rejected', { error });
+                });
+            }
+        }, 250);
+    }
+
+    function applyPlayerState(state) {
+        if (!playerVideo) return;
+        if (state.settings.muted) {
+            playerVideo.muted = true;
+            playerVideo.volume = 0;
+        }
+        playerVideo.playbackRate = 1;
+
+        if (state.status === 'paused' || ['stopped', 'idle', 'complete'].includes(state.status)) {
+            if (!playerVideo.paused) playerVideo.pause();
+        }
+    }
+
+    function hasBlockingQuestion() {
+        const question = document.querySelector('.question');
+        if (isVisible(question)) return true;
+        const dialogs = [...document.querySelectorAll('.layui-layer-dialog .layui-layer-content')];
+        return dialogs.some((dialog) => {
+            const text = normalizeText(dialog.textContent);
+            return isVisible(dialog) && text && !text.includes('视频即将结束');
+        });
+    }
+
+    function dismissKnownContinuePrompt() {
+        const contents = [...document.querySelectorAll('.layui-layer-content')];
+        const prompt = contents.find((node) => {
+            const text = normalizeText(node.textContent);
+            return isVisible(node) && text.includes('实时在线学习') && text.includes('继续学习');
+        });
+        if (!prompt) return;
+        const layer = prompt.closest('.layui-layer');
+        const confirm = layer?.querySelector('.layui-layer-btn0');
+        if (confirm) {
+            debugLog('info', 'continue-prompt-confirmed', { text: normalizeText(prompt.textContent) });
+            confirm.click();
+        }
+    }
+
+    function recoverIncompleteEndPosition(video, state) {
+        if (playerRecoverySeekApplied || !video) return false;
+        const duration = Number(video.duration || 0);
+        const currentTime = Number(video.currentTime || 0);
+        const beforeProgress = Number(state.beforeProgress || 0);
+        const currentLessonProgress = Number(state.currentLessonProgress || 0);
+        const creditedProgress = Math.max(
+            Number.isFinite(beforeProgress) ? beforeProgress : 0,
+            Number.isFinite(currentLessonProgress) ? currentLessonProgress : 0
+        );
+        if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(creditedProgress)) return false;
+        if (creditedProgress >= 99.9 || currentTime < duration - 2) return false;
+
+        // 旧版倍速可能把 lesson_location 写到结尾，但服务器只累计了部分真实时长。
+        // 回退到服务器已确认进度附近，并留 30 秒重叠，补足剩余正常学习时间。
+        const targetTime = Math.max(0, Math.min(duration - 30, duration * Math.max(0, creditedProgress) / 100 - 30));
+        playerRecoverySeekApplied = true;
+        playerEndedPublished = false;
+        video.currentTime = targetTime;
+        lastPlayerTime = targetTime;
+        lastPlayerProgressAt = Date.now();
+        lastPlayAttemptAt = 0;
+        debugLog('warn', 'incomplete-end-position-recovered', {
+            creditedProgress,
+            fromTime: currentTime,
+            targetTime,
+            duration,
+            lessonKey: playerLessonKey
+        });
+        publishEvent('resume-position-corrected', { creditedProgress, fromTime: currentTime, targetTime, duration });
+        return true;
+    }
+
+    function closePlayerWindow(reason = 'unspecified') {
+        debugLog('info', 'player-close-invoked', {
+            reason,
+            lessonKey: playerLessonKey,
+            currentTime: Number(playerVideo?.currentTime || 0),
+            duration: Number(playerVideo?.duration || 0),
+            ended: Boolean(playerVideo?.ended)
+        });
+        publishEvent('player-closing', { reason });
+        try {
+            const topDocument = window.top.document;
+            const closeButton = topDocument.querySelector('#btnexit, button.instructions-close');
+            if (closeButton) {
+                debugLog('info', 'player-close-button-click', { selector: closeButton.id || closeButton.className });
+                closeButton.click();
+                return;
+            }
+        } catch (_error) {
+            // 同源播放器通常允许访问；失败时使用 window.close 兜底。
+        }
+        debugLog('warn', 'player-window-close-fallback');
+        try {
+            window.top.close();
+        } catch (_error) {
+            window.close();
+        }
+    }
+
+    installGlobalErrorLogging();
+    debugLog('info', 'script-boot', {
+        version: VERSION,
+        hostname: location.hostname,
+        topLevel: window.top === window,
+        documentReadyState: document.readyState
+    });
+
+    if (location.hostname === MAIN_HOST) {
+        initMainPage();
+    } else if (PLAYER_HOSTS.has(location.hostname)) {
+        initPlayerPage();
+    }
+})();
