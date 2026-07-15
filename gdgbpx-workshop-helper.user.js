@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.0
+// @version      1.5.1
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -27,11 +27,13 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4.9';
+    const VERSION = '1.5.1';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
+    const LIST_SECTION_KEY = 'gdgbpx_workshop_helper_list_section_v1';
+    const LIST_SECTION_TTL_MS = 30 * 60 * 1000;
     const MAX_LOG_ENTRIES = 600;
     const IMPORTANT_LOG_RESERVE = 180;
     const LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -74,6 +76,7 @@
     let bridgeFlushTimer = null;
     let bridgeSending = false;
     let bridgeConnected = false;
+    let menuSectionTrackingInstalled = false;
     const logThrottle = new Map();
     let playerLessonKey = '';
     let emptyStudyingListSeenAt = 0;
@@ -421,9 +424,65 @@
         if (!location.hash.includes('/workshop/workshopindex/classList')) return false;
         const query = location.hash.includes('?') ? location.hash.split('?')[1] : '';
         const classType = new URLSearchParams(query).get('classType');
-        if (classType) return classType === '3';
-        const activeMenu = document.querySelector('.el-menu-item.is-active');
-        return normalizeText(activeMenu?.textContent) === '在学';
+        if (classType) return ['3', '在学', 'study', 'studying'].includes(classType);
+
+        const activeMenu = document.querySelector([
+            '.el-menu-item.is-active',
+            '.el-menu-item.active',
+            '[role="menuitem"][aria-current="page"]',
+            '[role="menuitem"][aria-selected="true"]'
+        ].join(','));
+        const activeText = normalizeText(activeMenu?.textContent);
+        if (activeText) return activeText === '在学';
+
+        const remembered = GM_getValue(LIST_SECTION_KEY, null);
+        if (remembered?.section && Date.now() - Number(remembered.at || 0) <= LIST_SECTION_TTL_MS) {
+            if (remembered.section === '在学') {
+                logDomSummary('studying-list-route-remembered', {
+                    section: remembered.section,
+                    ageMs: Date.now() - Number(remembered.at || 0),
+                    hash: sanitizedHash()
+                });
+                return true;
+            }
+        }
+
+        // The maintenance update removed classType and the active class. Once
+        // the user has started the assistant on this classList page, the
+        // presence of the “进入” cards is the safest available fallback.
+        const state = getState();
+        const hasWorkshopCards = Boolean(document.querySelector(
+            '.content-div .list_box .item_enter_button, .content-div .list_box button#enter_button'
+        ));
+        if (hasWorkshopCards) {
+            logDomSummary('studying-list-route-inferred', {
+                reason: 'classType-and-active-class-missing-after-maintenance',
+                hash: sanitizedHash(),
+                hasWorkshopCards,
+                assistantStatus: state.status
+            });
+            return true;
+        }
+        return false;
+    }
+
+    function sanitizedHash() {
+        return String(location.hash || '').replace(/([?&#](?:uid|token|session|sid)=)[^&#]*/gi, '$1[redacted]');
+    }
+
+    function installMenuSectionTracking() {
+        if (menuSectionTrackingInstalled) return;
+        menuSectionTrackingInstalled = true;
+        document.addEventListener('click', (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const item = target?.closest('.el-menu-item,[role="menuitem"]');
+            if (!item) return;
+            const section = normalizeText(item.textContent);
+            if (!['进行中', '在学', '已学', '已截止', '检索'].includes(section)) return;
+            GM_setValue(LIST_SECTION_KEY, { section, at: Date.now() });
+            debugLog('info', 'workshop-menu-section-clicked', { section, hash: sanitizedHash() });
+            scheduleMainTick();
+        }, true);
     }
 
     function isAnyWorkshopListRoute() {
@@ -454,6 +513,7 @@
         if (window.top !== window) return;
         debugLog('info', 'main-init', { hash: location.hash });
         installPanel();
+        installMenuSectionTracking();
         GM_registerMenuCommand('显示学习助手面板', () => {
             installPanel(true);
         });
