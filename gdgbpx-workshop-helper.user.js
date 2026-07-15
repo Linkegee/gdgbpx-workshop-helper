@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.3
+// @version      1.5.4
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -27,7 +27,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.3';
+    const VERSION = '1.5.4';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -112,6 +112,7 @@
             stopRequestAt: 0,
             completedCloseRequestAt: 0,
             completedCloseAttempts: 0,
+            serverCompletedLessonKeys: [],
             settings: {
                 playbackRate: 1,
                 muted: true,
@@ -135,6 +136,9 @@
                 : [],
             skippedLessonKeys: Array.isArray(saved.skippedLessonKeys)
                 ? saved.skippedLessonKeys
+                : [],
+            serverCompletedLessonKeys: Array.isArray(saved.serverCompletedLessonKeys)
+                ? saved.serverCompletedLessonKeys
                 : []
         };
         // v1.4.2 could treat a non-100% status label as complete. Convert that
@@ -776,6 +780,7 @@
                 stopRequestAt: 0,
                 completedCloseRequestAt: 0,
                 completedCloseAttempts: 0,
+                serverCompletedLessonKeys: freshRun ? [] : state.serverCompletedLessonKeys,
                 openAttempts: 0,
                 fallbackOpenAttempted: false
             });
@@ -1043,7 +1048,11 @@
             refreshAttempts: 0,
             lastActionAt: Date.now(),
             completedCloseRequestAt: Date.now(),
-            completedCloseAttempts: 1
+            completedCloseAttempts: 1,
+            serverCompletedLessonKeys: uniqueAppend(
+                state.serverCompletedLessonKeys,
+                lessonKey(state.currentClassId || currentClassId(), lesson.title)
+            )
         });
         debugLog('info', 'server-completion-confirmed-close-requested', {
             source,
@@ -1224,7 +1233,12 @@
             lessons: lessons.map((lesson) => ({ title: lesson.title, progress: lesson.progress, status: lesson.status }))
         });
         if (state.currentClassId !== classId) {
-            state = updateState({ currentClassId: classId, phase: 'detail-ready', message: `已读取 ${lessons.length} 个必修课程` });
+            state = updateState({
+                currentClassId: classId,
+                phase: 'detail-ready',
+                message: `已读取 ${lessons.length} 个必修课程`,
+                serverCompletedLessonKeys: []
+            });
         }
 
         const currentLesson = lessons.find((lesson) => lesson.title === state.currentLessonTitle);
@@ -1374,7 +1388,13 @@
             return;
         }
 
-        const unfinished = lessons.filter((lesson) => !lesson.complete);
+        const serverCompletedLessonKeys = Array.isArray(state.serverCompletedLessonKeys)
+            ? state.serverCompletedLessonKeys
+            : [];
+        const unfinished = lessons.filter((lesson) => {
+            if (lesson.complete) return false;
+            return !serverCompletedLessonKeys.includes(lessonKey(classId, lesson.title));
+        });
         if (!unfinished.length) {
             const title = state.currentWorkshopTitle || `classId:${classId}`;
             updateState({
@@ -1390,7 +1410,8 @@
         }
 
         const nextLesson = unfinished.find((lesson) => {
-            return !state.skippedLessonKeys.includes(lessonKey(classId, lesson.title));
+            const key = lessonKey(classId, lesson.title);
+            return !state.skippedLessonKeys.includes(key) && !serverCompletedLessonKeys.includes(key);
         });
         if (!nextLesson) {
             updateState({
