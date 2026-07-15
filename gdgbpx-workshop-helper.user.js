@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.8
+// @version      1.5.9
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.8';
+    const VERSION = '1.5.9';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -83,6 +83,7 @@
     let lastAutoScrolledLessonKey = '';
     let lastLessonSelectionSnapshot = '';
     let lastIgnoredDetailProgressSnapshot = '';
+    let lastVisibleProbeSyncSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
     let bridgeFlushTimer = null;
@@ -1117,6 +1118,82 @@
         }).filter((lesson) => lesson.title && lesson.titleElement);
     }
 
+    function syncVisibleDetailFromProbe(probeDocument, probeLessons) {
+        if (!probeDocument || probeDocument === document || !isDetailRoute()) return;
+        const visibleLessons = readLessons(document);
+        if (!visibleLessons.length) return;
+
+        const visibleByTitle = new Map(visibleLessons.map((lesson) => [lesson.title, lesson]));
+        const changes = [];
+        for (const probeLesson of probeLessons) {
+            const visibleLesson = visibleByTitle.get(probeLesson.title);
+            if (!visibleLesson) continue;
+
+            const beforeProgress = visibleLesson.progress;
+            const beforeStatus = visibleLesson.status;
+            const sourceProgress = probeLesson.box.querySelector('[role="progressbar"][aria-valuenow]');
+            const targetProgress = visibleLesson.box.querySelector('[role="progressbar"][aria-valuenow]');
+            if (sourceProgress && targetProgress) {
+                for (const attribute of ['aria-valuenow', 'aria-valuemin', 'aria-valuemax']) {
+                    const value = sourceProgress.getAttribute(attribute);
+                    if (value !== null) targetProgress.setAttribute(attribute, value);
+                }
+                const sourceBar = sourceProgress.querySelector('.el-progress-bar__inner');
+                const targetBar = targetProgress.querySelector('.el-progress-bar__inner');
+                if (sourceBar && targetBar) {
+                    targetBar.className = sourceBar.className;
+                    targetBar.style.cssText = sourceBar.style.cssText;
+                }
+                const sourceText = sourceProgress.querySelector('.el-progress__text')
+                    || probeLesson.box.querySelector('.el-progress__text');
+                const targetText = targetProgress.querySelector('.el-progress__text')
+                    || visibleLesson.box.querySelector('.el-progress__text');
+                if (sourceText && targetText) {
+                    targetText.textContent = sourceText.textContent;
+                    targetText.style.cssText = sourceText.style.cssText;
+                }
+            }
+
+            const sourceStatus = probeLesson.box.querySelector('.item_status');
+            const targetStatus = visibleLesson.box.querySelector('.item_status');
+            if (sourceStatus && targetStatus) {
+                targetStatus.replaceChildren(...[...sourceStatus.childNodes].map((node) => node.cloneNode(true)));
+                targetStatus.className = sourceStatus.className;
+                targetStatus.style.cssText = sourceStatus.style.cssText;
+            }
+
+            if (beforeProgress !== probeLesson.progress || beforeStatus !== probeLesson.status) {
+                changes.push({
+                    lesson: probeLesson.title,
+                    fromProgress: beforeProgress,
+                    toProgress: probeLesson.progress,
+                    fromStatus: beforeStatus,
+                    toStatus: probeLesson.status
+                });
+            }
+        }
+
+        const sourceRequiredTab = probeDocument.querySelector('#tab-required');
+        const targetRequiredTab = document.querySelector('#tab-required');
+        if (sourceRequiredTab && targetRequiredTab
+            && normalizeText(sourceRequiredTab.textContent) !== normalizeText(targetRequiredTab.textContent)) {
+            targetRequiredTab.textContent = sourceRequiredTab.textContent;
+        }
+
+        if (changes.length) {
+            const snapshot = JSON.stringify(changes.map((change) => [
+                change.lesson, change.toProgress, change.toStatus
+            ]));
+            if (snapshot !== lastVisibleProbeSyncSnapshot) {
+                lastVisibleProbeSyncSnapshot = snapshot;
+                debugLog('info', 'visible-detail-synced-from-live-probe', {
+                    changedCount: changes.length,
+                    changes
+                });
+            }
+        }
+    }
+
     function serverStatusProbeIsActive(state = getState()) {
         return window.top === window
             && isDetailRoute()
@@ -1255,6 +1332,7 @@
             }
             return;
         }
+        syncVisibleDetailFromProbe(serverStatusFrame.contentDocument, lessons);
         const lesson = lessons.find((item) => item.title === state.currentLessonTitle);
         if (!lesson) {
             debugLog('warn', 'server-status-probe-current-lesson-missing', {
