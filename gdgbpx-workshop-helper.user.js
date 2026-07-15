@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.4.9
+// @version      1.5.0
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -19,6 +19,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @connect      127.0.0.1
 // @run-at       document-idle
 // ==/UserScript==
@@ -45,7 +46,8 @@
     const TICK_MS = 1200;
     const DETAIL_REFRESH_DELAY_MS = 8000;
     const MAX_PROGRESS_REFRESHES = 4;
-    const SERVER_PROGRESS_POLL_MS = 30000;
+    // Do not reload the Vue detail page while a player is active. A full-page
+    // reload can interrupt the popup/HLS session and is not a safe progress poll.
     const COMPLETED_CLOSE_RETRY_MS = 6000;
     const COMPLETED_CLOSE_GRACE_MS = 60000;
     const MAX_COMPLETED_CLOSE_RETRIES = 5;
@@ -53,7 +55,6 @@
 
     let mainTickTimer = null;
     let detailRefreshTimer = null;
-    let serverProgressMonitorTimer = null;
     let panel = null;
     let playerVideo = null;
     let playerTimer = null;
@@ -69,6 +70,7 @@
     let lastDomSummary = '';
     let lastAutoScrolledLessonKey = '';
     let bridgeQueue = [];
+    let fallbackPlayerTab = null;
     let bridgeFlushTimer = null;
     let bridgeSending = false;
     let bridgeConnected = false;
@@ -93,6 +95,7 @@
             lastActionAt: 0,
             refreshAttempts: 0,
             openAttempts: 0,
+            fallbackOpenAttempted: false,
             finishedWorkshopTitles: [],
             skippedLessonKeys: [],
             skipRequestAt: 0,
@@ -479,21 +482,9 @@
         const observer = new MutationObserver(scheduleMainTick);
         observer.observe(document.documentElement, { childList: true, subtree: true });
         scheduleMainTick();
-        scheduleServerProgressMonitor();
-    }
-
-    function scheduleServerProgressMonitor() {
-        clearTimeout(serverProgressMonitorTimer);
-        serverProgressMonitorTimer = setTimeout(() => {
-            const state = getState();
-            if (state.status !== 'running' || !isDetailRoute() || !['opening-video', 'watching-video'].includes(state.phase)) return;
-            debugLog('info', 'server-progress-poll-reload', {
-                phase: state.phase,
-                lesson: state.currentLessonTitle,
-                intervalMs: SERVER_PROGRESS_POLL_MS
-            });
-            location.reload();
-        }, SERVER_PROGRESS_POLL_MS);
+        debugLog('info', 'server-progress-monitor-disabled', {
+            reason: '观看期间不整页刷新；播放器结束或关闭后再刷新详情确认服务器状态'
+        });
     }
 
     function installPanel(forceShow = false) {
@@ -716,7 +707,8 @@
                 stopRequestAt: 0,
                 completedCloseRequestAt: 0,
                 completedCloseAttempts: 0,
-                openAttempts: 0
+                openAttempts: 0,
+                fallbackOpenAttempted: false
             });
             scheduleMainTick();
             return;
@@ -738,6 +730,7 @@
                         ? 'checking-progress'
                         : state.phase,
                 openAttempts: 0,
+                fallbackOpenAttempted: false,
                 currentLessonTitle: continueAfterManualClose ? '' : state.currentLessonTitle,
                 currentLessonKey: continueAfterManualClose ? '' : state.currentLessonKey,
                 completedCloseRequestAt: 0,
@@ -921,6 +914,31 @@
         return `${classId || 'unknown'}::${title}`;
     }
 
+    const PLAYER_FALLBACK_URL = 'https://wcs1.shawcoder.xyz/gdcecw/play_pc/playdo_pc.html';
+
+    function openPlayerFallbackTab() {
+        try {
+            if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
+                debugLog('info', 'player-open-fallback-already-exists');
+                return true;
+            }
+            const tab = GM_openInTab(PLAYER_FALLBACK_URL, {
+                active: true,
+                insert: true,
+                setParent: true
+            });
+            fallbackPlayerTab = tab || null;
+            debugLog('warn', 'player-open-fallback-tab', {
+                url: PLAYER_FALLBACK_URL,
+                hasCloseHandle: Boolean(tab && typeof tab.close === 'function')
+            });
+            return true;
+        } catch (error) {
+            debugLog('error', 'player-open-fallback-failed', { error });
+            return false;
+        }
+    }
+
     function openCurrentLessonFromUserGesture() {
         const state = getState();
         if (!isDetailRoute() || !state.currentLessonTitle) return false;
@@ -933,7 +951,8 @@
             phase: 'opening-video',
             message: '正在通过“继续”的用户点击重新打开播放器',
             lastActionAt: Date.now(),
-            openAttempts: 0
+            openAttempts: 0,
+            fallbackOpenAttempted: false
         });
         debugLog('info', 'lesson-open-user-gesture', { title: lesson.title, index: lesson.index });
         lesson.titleElement.scrollIntoView({ block: 'center', behavior: 'auto' });
@@ -1112,16 +1131,31 @@
             if (state.phase === 'opening-video' && age > 30000) {
                 const attempts = Number(state.openAttempts || 0) + 1;
                 if (attempts >= 3) {
-                    updateState({
-                        status: 'paused',
-                        phase: 'player-open-failed',
-                        openAttempts: attempts,
-                        message: '播放器连续 3 次未启动，已暂停以避免无限重试；确认浏览器允许弹窗后点击“继续”'
-                    });
-                    debugLog('warn', 'player-open-retries-exhausted', {
-                        lesson: state.currentLessonTitle,
-                        attempts
-                    });
+                    if (!state.fallbackOpenAttempted && openPlayerFallbackTab()) {
+                        updateState({
+                            phase: 'opening-video',
+                            openAttempts: attempts,
+                            fallbackOpenAttempted: true,
+                            lastActionAt: Date.now(),
+                            message: '常规弹窗未启动，已使用扩展标签页兜底打开播放器'
+                        });
+                        debugLog('warn', 'player-open-fallback-started', {
+                            lesson: state.currentLessonTitle,
+                            attempts
+                        });
+                    } else {
+                        updateState({
+                            status: 'paused',
+                            phase: 'player-open-failed',
+                            openAttempts: attempts,
+                            message: '常规弹窗和标签页兜底均未启动；请确认播放器域名允许弹窗后点击“继续”'
+                        });
+                        debugLog('warn', 'player-open-retries-exhausted', {
+                            lesson: state.currentLessonTitle,
+                            attempts,
+                            fallbackOpenAttempted: Boolean(state.fallbackOpenAttempted)
+                        });
+                    }
                 } else {
                     updateState({
                         phase: 'detail-ready',
@@ -1161,6 +1195,7 @@
         }
 
         const key = lessonKey(classId, nextLesson.title);
+        const sameLesson = state.currentLessonKey === key;
         updateState({
             phase: 'opening-video',
             message: `打开必修 ${nextLesson.index + 1}/${lessons.length}`,
@@ -1168,9 +1203,10 @@
             currentLessonKey: key,
             currentLessonProgress: nextLesson.progress,
             beforeProgress: nextLesson.progress,
+            fallbackOpenAttempted: sameLesson ? Boolean(state.fallbackOpenAttempted) : false,
             lastActionAt: Date.now(),
             refreshAttempts: 0,
-            openAttempts: state.currentLessonKey === key ? Number(state.openAttempts || 0) : 0
+            openAttempts: sameLesson ? Number(state.openAttempts || 0) : 0
         });
         debugLog('info', 'lesson-open-click', {
             classId,
@@ -1220,7 +1256,8 @@
                 phase: 'watching-video',
                 message: `播放器已开始（${event.rate || state.settings.playbackRate}×）`,
                 lastActionAt: Date.now(),
-                openAttempts: 0
+                openAttempts: 0,
+                fallbackOpenAttempted: false
             });
             return;
         }
@@ -1245,6 +1282,16 @@
         if (event.type === 'manual-question') {
             updateState({ message: '播放器检测到课程提问，请在播放器窗口中手动完成' });
             return;
+        }
+
+        if (event.type === 'player-closing' && fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
+            try {
+                fallbackPlayerTab.close();
+                debugLog('info', 'player-open-fallback-closed');
+            } catch (error) {
+                debugLog('warn', 'player-open-fallback-close-failed', { error });
+            }
+            fallbackPlayerTab = null;
         }
 
         if (event.type === 'video-stall-warning' && state.status === 'running') {
