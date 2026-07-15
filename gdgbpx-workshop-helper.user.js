@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.6
+// @version      1.5.7
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.6';
+    const VERSION = '1.5.7';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -77,6 +77,7 @@
     let lastDomSummary = '';
     let lastAutoScrolledLessonKey = '';
     let lastLessonSelectionSnapshot = '';
+    let lastIgnoredDetailProgressSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
     let bridgeFlushTimer = null;
@@ -1335,6 +1336,7 @@
         });
         if (state.currentClassId !== classId) {
             lastLessonSelectionSnapshot = '';
+            lastIgnoredDetailProgressSnapshot = '';
             state = updateState({
                 currentClassId: classId,
                 phase: 'detail-ready',
@@ -1345,14 +1347,35 @@
 
         const currentLesson = lessons.find((lesson) => lesson.title === state.currentLessonTitle);
         if (currentLesson && state.currentLessonTitle && state.currentLessonProgress !== currentLesson.progress) {
-            state = updateState({
-                currentLessonProgress: currentLesson.progress
-            });
-            debugLog('info', 'panel-progress-synced-from-detail', {
-                lesson: currentLesson.title,
-                progress: currentLesson.progress,
-                status: currentLesson.status
-            });
+            const currentProgress = Number(state.currentLessonProgress || 0);
+            const visibleProgress = Number(currentLesson.progress || 0);
+            const staleVisibleProgress = serverStatusProbeIsActive(state)
+                && !currentLesson.complete
+                && visibleProgress < currentProgress;
+            if (staleVisibleProgress) {
+                const snapshot = `${state.currentLessonKey}|${currentProgress}|${visibleProgress}|${currentLesson.status}`;
+                if (snapshot !== lastIgnoredDetailProgressSnapshot) {
+                    lastIgnoredDetailProgressSnapshot = snapshot;
+                    debugLog('info', 'panel-progress-stale-detail-ignored', {
+                        lesson: currentLesson.title,
+                        lessonKey: state.currentLessonKey,
+                        probeProgress: currentProgress,
+                        visibleDetailProgress: visibleProgress,
+                        visibleDetailStatus: currentLesson.status,
+                        reason: 'live-probe-progress-is-newer'
+                    });
+                }
+            } else {
+                lastIgnoredDetailProgressSnapshot = '';
+                state = updateState({
+                    currentLessonProgress: currentLesson.progress
+                });
+                debugLog('info', 'panel-progress-synced-from-detail', {
+                    lesson: currentLesson.title,
+                    progress: currentLesson.progress,
+                    status: currentLesson.status
+                });
+            }
         }
         if (currentLesson && state.currentLessonTitle) {
             const currentKey = lessonKey(classId, currentLesson.title);
