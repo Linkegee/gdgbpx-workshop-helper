@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.9
+// @version      1.5.10
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.9';
+    const VERSION = '1.5.10';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -1609,13 +1609,15 @@
                     Number(state.closingPlayerLastSeenAt || 0),
                     heartbeatMatches ? Number(heartbeat.at || 0) : 0
                 );
+                const unloadAt = Number(state.closingPlayerUnloadAt || 0);
                 const closeStartedAt = Number(state.completedCloseStartedAt || state.completedCloseRequestAt || 0);
                 const closeAge = closeStartedAt ? now - closeStartedAt : 0;
-                const silenceAge = lastSeenAt ? now - lastSeenAt : 0;
-                if (lastSeenAt
+                const closeEvidenceAt = Math.max(lastSeenAt, unloadAt);
+                const silenceAge = closeEvidenceAt ? now - closeEvidenceAt : 0;
+                if (unloadAt
                     && closeAge >= PLAYER_CLOSE_MIN_CONFIRM_MS
                     && silenceAge >= PLAYER_CLOSE_HEARTBEAT_SILENCE_MS) {
-                    confirmCompletedPlayerClosed(state, 'matching-player-heartbeat-silent', heartbeatMatches ? heartbeat : null);
+                    confirmCompletedPlayerClosed(state, 'matching-player-unloaded-and-heartbeat-silent', heartbeatMatches ? heartbeat : null);
                     return;
                 }
             }
@@ -1634,6 +1636,7 @@
                     attempt: attempts,
                     waitedMs: age,
                     playerSessionId: state.closingPlayerSessionId,
+                    playerUnloadAt: state.closingPlayerUnloadAt,
                     heartbeat: getPlayerHeartbeat()
                 });
                 return;
@@ -1823,6 +1826,28 @@
         lastHandledEventId = event.id;
         const state = getState();
         debugLog('info', 'player-event-received', { event, status: state.status, phase: state.phase });
+
+        const completedEventLesson = Boolean(event.lessonKey)
+            && state.serverCompletedLessonKeys.includes(event.lessonKey);
+        const playerRuntimeEvent = [
+            'video-started', 'video-progress', 'video-ended', 'video-closed',
+            'player-unloading', 'player-closing', 'video-stalled', 'video-stall-warning',
+            'manual-question'
+        ].includes(event.type);
+        if (state.phase !== 'closing-completed-player'
+            && playerRuntimeEvent
+            && (completedEventLesson || !state.currentLessonKey || !state.currentLessonTitle)) {
+            debugLog('info', 'completed-player-tail-event-ignored', {
+                type: event.type,
+                eventLessonKey: event.lessonKey,
+                eventPlayerSessionId: event.playerSessionId,
+                currentLessonKey: state.currentLessonKey,
+                currentLessonTitle: state.currentLessonTitle,
+                phase: state.phase,
+                reason: completedEventLesson ? 'lesson-already-server-completed' : 'no-active-lesson'
+            });
+            return;
+        }
 
         if (event.lessonKey && state.currentLessonKey && event.lessonKey !== state.currentLessonKey) {
             debugLog('warn', 'stale-player-event-ignored', {
@@ -2040,6 +2065,34 @@
         return heartbeat && typeof heartbeat === 'object' ? heartbeat : null;
     }
 
+    function handlePlayerCloseRequest(state = getState()) {
+        if (!state.stopRequestAt && !state.skipRequestAt && !state.completedCloseRequestAt) return false;
+        const requestAt = Math.max(
+            state.stopRequestAt || 0,
+            state.skipRequestAt || 0,
+            state.completedCloseRequestAt || 0
+        );
+        const handledAt = Number(sessionStorage.getItem('gbpxHandledCloseRequest') || 0);
+        if (requestAt <= handledAt) return false;
+
+        sessionStorage.setItem('gbpxHandledCloseRequest', String(requestAt));
+        const reason = requestAt === state.completedCloseRequestAt
+            ? 'server-completion-confirmed'
+            : state.stopRequestAt >= state.skipRequestAt
+                ? 'stop-request'
+                : 'skip-request';
+        debugLog('info', 'player-close-request', {
+            source: 'state-change-or-tick',
+            requestAt,
+            stop: state.stopRequestAt,
+            skip: state.skipRequestAt,
+            completed: state.completedCloseRequestAt,
+            reason
+        });
+        closePlayerWindow(reason);
+        return true;
+    }
+
     function initPlayerPage() {
         const initialState = getState();
         const identityResult = initializePlayerIdentity(initialState);
@@ -2055,7 +2108,9 @@
             currentLessonProgress: initialState.currentLessonProgress
         });
         GM_addValueChangeListener(STATE_KEY, (_name, _oldValue, value) => {
-            applyPlayerState(value ? getState() : defaultState());
+            const nextState = value ? getState() : defaultState();
+            if (handlePlayerCloseRequest(nextState)) return;
+            applyPlayerState(nextState);
         });
 
         if (window.top === window) {
@@ -2094,31 +2149,7 @@
         const video = document.querySelector('video');
         if (video && video !== playerVideo) attachVideo(video);
 
-        if (state.stopRequestAt || state.skipRequestAt || state.completedCloseRequestAt) {
-            const requestAt = Math.max(
-                state.stopRequestAt || 0,
-                state.skipRequestAt || 0,
-                state.completedCloseRequestAt || 0
-            );
-            const handledAt = Number(sessionStorage.getItem('gbpxHandledCloseRequest') || 0);
-            if (requestAt > handledAt) {
-                sessionStorage.setItem('gbpxHandledCloseRequest', String(requestAt));
-                const reason = requestAt === state.completedCloseRequestAt
-                    ? 'server-completion-confirmed'
-                    : state.stopRequestAt >= state.skipRequestAt
-                        ? 'stop-request'
-                        : 'skip-request';
-                debugLog('info', 'player-close-request', {
-                    requestAt,
-                    stop: state.stopRequestAt,
-                    skip: state.skipRequestAt,
-                    completed: state.completedCloseRequestAt,
-                    reason
-                });
-                closePlayerWindow(reason);
-                return;
-            }
-        }
+        if (handlePlayerCloseRequest(state)) return;
 
         if (!playerVideo) return;
         applyPlayerState(state);
