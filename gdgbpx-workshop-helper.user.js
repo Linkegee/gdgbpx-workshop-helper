@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.1
+// @version      1.5.2
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -27,7 +27,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.1';
+    const VERSION = '1.5.2';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -46,10 +46,11 @@
     const MAIN_HOST = 'gbpx.gd.gov.cn';
     const PLAYER_HOSTS = new Set(['wcs1.shawcoder.xyz', 'cs1.gdgbpx.com']);
     const TICK_MS = 1200;
-    const DETAIL_REFRESH_DELAY_MS = 8000;
     const MAX_PROGRESS_REFRESHES = 4;
-    // Do not reload the Vue detail page while a player is active. A full-page
-    // reload can interrupt the popup/HLS session and is not a safe progress poll.
+    // Do not reload the visible Vue detail page while a player is active. The
+    // hidden same-origin probe below is used for server-status polling instead.
+    const SERVER_STATUS_PROBE_INTERVAL_MS = 6500;
+    const SERVER_STATUS_PROBE_TIMEOUT_MS = 20000;
     const COMPLETED_CLOSE_RETRY_MS = 6000;
     const COMPLETED_CLOSE_GRACE_MS = 60000;
     const MAX_COMPLETED_CLOSE_RETRIES = 5;
@@ -77,6 +78,12 @@
     let bridgeSending = false;
     let bridgeConnected = false;
     let menuSectionTrackingInstalled = false;
+    let serverStatusFrame = null;
+    let serverStatusFrameKey = '';
+    let serverStatusFrameReady = false;
+    let serverStatusMonitorTimer = null;
+    let serverStatusProbeStartedAt = 0;
+    let lastServerStatusSnapshot = '';
     const logThrottle = new Map();
     let playerLessonKey = '';
     let emptyStudyingListSeenAt = 0;
@@ -542,8 +549,10 @@
         const observer = new MutationObserver(scheduleMainTick);
         observer.observe(document.documentElement, { childList: true, subtree: true });
         scheduleMainTick();
-        debugLog('info', 'server-progress-monitor-disabled', {
-            reason: '观看期间不整页刷新；播放器结束或关闭后再刷新详情确认服务器状态'
+        debugLog('info', 'server-progress-monitor-mode', {
+            mode: 'hidden-same-origin-iframe',
+            intervalMs: SERVER_STATUS_PROBE_INTERVAL_MS,
+            completionSignal: 'status=已完成'
         });
     }
 
@@ -847,6 +856,7 @@
     function mainTick() {
         renderPanel(getState());
         const state = getState();
+        syncServerStatusMonitor(state);
         if (state.status !== 'running') return;
 
         if (isListRoute()) {
@@ -948,8 +958,8 @@
         });
     }
 
-    function readLessons() {
-        return [...document.querySelectorAll('#pane-required .item_box')].map((box, index) => {
+    function readLessons(rootDocument = document) {
+        return [...rootDocument.querySelectorAll('#pane-required .item_box')].map((box, index) => {
             const titleElement = box.querySelector('.item_title');
             const progressElement = box.querySelector('[role="progressbar"][aria-valuenow]');
             const progress = Number.parseFloat(progressElement?.getAttribute('aria-valuenow') || '0');
@@ -968,6 +978,164 @@
                 complete: status.includes('已完成')
             };
         }).filter((lesson) => lesson.title && lesson.titleElement);
+    }
+
+    function serverStatusProbeIsActive(state = getState()) {
+        return window.top === window
+            && isDetailRoute()
+            && state.status === 'running'
+            && Boolean(state.currentLessonTitle)
+            && ['opening-video', 'watching-video', 'checking-progress', 'refresh-delay'].includes(state.phase);
+    }
+
+    function serverStatusProbeUrl() {
+        const [base, hash = ''] = String(location.href).split('#');
+        const separator = base.includes('?') ? '&' : '?';
+        return `${base}${separator}_gbpx_status_probe=${Date.now()}${hash ? `#${hash}` : ''}`;
+    }
+
+    function stopServerStatusMonitor(reason = 'inactive') {
+        if (serverStatusMonitorTimer) {
+            clearInterval(serverStatusMonitorTimer);
+            serverStatusMonitorTimer = null;
+        }
+        if (serverStatusFrame) {
+            serverStatusFrame.remove();
+            serverStatusFrame = null;
+        }
+        if (serverStatusFrameKey) {
+            debugLog('info', 'server-status-monitor-stopped', { reason });
+        }
+        serverStatusFrameKey = '';
+        serverStatusFrameReady = false;
+        serverStatusProbeStartedAt = 0;
+        lastServerStatusSnapshot = '';
+    }
+
+    function reloadServerStatusFrame(reason = 'interval') {
+        if (!serverStatusFrame) return false;
+        serverStatusFrameReady = false;
+        serverStatusProbeStartedAt = Date.now();
+        serverStatusFrame.src = serverStatusProbeUrl();
+        debugLog('info', 'server-status-probe-reload', {
+            reason,
+            lesson: getState().currentLessonTitle
+        });
+        return true;
+    }
+
+    function confirmServerCompletion(lesson, source = 'detail-dom') {
+        const state = getState();
+        if (!lesson?.complete || state.status !== 'running' || !state.currentLessonTitle) return false;
+        if (lesson.title !== state.currentLessonTitle || state.phase === 'closing-completed-player') return false;
+        updateState({
+            phase: 'closing-completed-player',
+            message: `服务器已确认完成：${lesson.title}；正在关闭播放器`,
+            currentLessonProgress: lesson.progress,
+            refreshAttempts: 0,
+            lastActionAt: Date.now(),
+            completedCloseRequestAt: Date.now(),
+            completedCloseAttempts: 1
+        });
+        debugLog('info', 'server-completion-confirmed-close-requested', {
+            source,
+            lesson: lesson.title,
+            status: lesson.status,
+            progress: lesson.progress
+        });
+        stopServerStatusMonitor('completion-confirmed');
+        return true;
+    }
+
+    function readServerStatusProbeDocument() {
+        if (!serverStatusFrame || !serverStatusFrame.contentDocument) return;
+        const state = getState();
+        if (!serverStatusProbeIsActive(state)) return;
+        const lessons = readLessons(serverStatusFrame.contentDocument);
+        if (!lessons.length) {
+            if (Date.now() - serverStatusProbeStartedAt > SERVER_STATUS_PROBE_TIMEOUT_MS) {
+                debugLog('warn', 'server-status-probe-empty-timeout', {
+                    lesson: state.currentLessonTitle,
+                    readyState: serverStatusFrame.contentDocument.readyState
+                });
+                serverStatusProbeStartedAt = Date.now();
+                reloadServerStatusFrame('empty-timeout');
+            }
+            return;
+        }
+        const lesson = lessons.find((item) => item.title === state.currentLessonTitle);
+        if (!lesson) {
+            debugLog('warn', 'server-status-probe-current-lesson-missing', {
+                lesson: state.currentLessonTitle,
+                lessonCount: lessons.length,
+                titles: lessons.map((item) => item.title)
+            });
+            return;
+        }
+        const snapshot = `${lesson.title}|${lesson.status}|${lesson.progress}`;
+        if (snapshot !== lastServerStatusSnapshot) {
+            lastServerStatusSnapshot = snapshot;
+            debugLog('info', 'server-status-probe-result', {
+                lesson: lesson.title,
+                status: lesson.status,
+                progress: lesson.progress,
+                complete: lesson.complete
+            });
+        }
+        if (confirmServerCompletion(lesson, 'live-server-status-probe')) return;
+        if (state.currentLessonProgress !== lesson.progress) {
+            updateState({ currentLessonProgress: lesson.progress });
+            debugLog('info', 'panel-progress-synced-from-live-probe', {
+                lesson: lesson.title,
+                status: lesson.status,
+                progress: lesson.progress
+            });
+        }
+    }
+
+    function syncServerStatusMonitor(state = getState()) {
+        if (!serverStatusProbeIsActive(state)) {
+            stopServerStatusMonitor('state-not-active');
+            return;
+        }
+        const key = lessonKey(state.currentClassId, state.currentLessonTitle);
+        if (serverStatusFrame && serverStatusFrameKey !== key) {
+            stopServerStatusMonitor('lesson-changed');
+        }
+        if (!serverStatusFrame) {
+            serverStatusFrameKey = key;
+            serverStatusFrame = document.createElement('iframe');
+            serverStatusFrame.setAttribute('aria-hidden', 'true');
+            serverStatusFrame.tabIndex = -1;
+            serverStatusFrame.style.cssText = 'position:fixed;left:-10000px;top:-10000px;width:2px;height:2px;border:0;opacity:0;pointer-events:none;';
+            serverStatusFrame.addEventListener('load', () => {
+                serverStatusFrameReady = true;
+                debugLog('info', 'server-status-probe-loaded', {
+                    lesson: getState().currentLessonTitle,
+                    readyState: serverStatusFrame?.contentDocument?.readyState || 'unknown'
+                });
+                readServerStatusProbeDocument();
+            });
+            serverStatusFrame.addEventListener('error', () => {
+                serverStatusFrameReady = false;
+                debugLog('warn', 'server-status-probe-load-error', { lesson: getState().currentLessonTitle });
+            });
+            document.body.appendChild(serverStatusFrame);
+            debugLog('info', 'server-status-monitor-started', {
+                lesson: state.currentLessonTitle,
+                classId: state.currentClassId,
+                intervalMs: SERVER_STATUS_PROBE_INTERVAL_MS
+            });
+            reloadServerStatusFrame('initial');
+            serverStatusMonitorTimer = setInterval(() => {
+                const latest = getState();
+                if (!serverStatusProbeIsActive(latest)) {
+                    stopServerStatusMonitor('interval-state-not-active');
+                    return;
+                }
+                reloadServerStatusFrame(serverStatusFrameReady ? 'interval' : 'not-ready-retry');
+            }, SERVER_STATUS_PROBE_INTERVAL_MS);
+        }
     }
 
     function lessonKey(classId, title) {
@@ -1068,22 +1236,11 @@
                 });
             }
         }
-        // The detail page is the server-side source of truth. A polling refresh can
-        // confirm 100% even before the player emits its final ended event.
+        // The explicit server status text is the source of truth. During playback
+        // the hidden same-origin probe supplies a fresh detail DOM without
+        // reloading or interrupting the visible page.
         if (state.phase === 'watching-video' && currentLesson?.complete) {
-            updateState({
-                phase: 'closing-completed-player',
-                message: `服务器已确认完成：${currentLesson.title}；正在关闭播放器`,
-                currentLessonProgress: currentLesson.progress,
-                refreshAttempts: 0,
-                lastActionAt: Date.now(),
-                completedCloseRequestAt: Date.now(),
-                completedCloseAttempts: 1
-            });
-            debugLog('info', 'server-progress-poll-confirmed-completion', {
-                lesson: currentLesson.title,
-                progress: currentLesson.progress
-            });
+            confirmServerCompletion(currentLesson, 'visible-detail-dom');
             return;
         }
         if (state.phase === 'checking-progress' || state.phase === 'refresh-delay') {
@@ -1100,28 +1257,10 @@
                 });
                 return;
             } else if (currentLesson.complete) {
-                // A media ended event is not proof of completion. The refreshed detail
-                // page must confirm completion before the player receives a close request.
-                state = updateState({
-                    phase: 'closing-completed-player',
-                    message: `服务器已确认完成：${currentLesson.title}；正在关闭播放器`,
-                    currentLessonProgress: currentLesson.progress,
-                    refreshAttempts: 0,
-                    lastActionAt: Date.now(),
-                    completedCloseRequestAt: Date.now(),
-                    completedCloseAttempts: 1
-                });
-                debugLog('info', 'server-completion-confirmed-close-requested', {
-                    lesson: currentLesson.title,
-                    progress: currentLesson.progress
-                });
-            } else if (!currentLesson) {
-                state = updateState({
-                    phase: 'detail-ready',
-                    message: currentLesson ? `已完成：${currentLesson.title}` : '重新读取课程列表',
-                    currentLessonTitle: '', currentLessonKey: '', currentLessonProgress: currentLesson?.progress || 100,
-                    refreshAttempts: 0, lastActionAt: 0
-                });
+                // A media ended event is not proof of completion. Only the
+                // explicit 已完成 status may request a player close.
+                confirmServerCompletion(currentLesson, 'visible-detail-dom');
+                return;
             } else if (state.refreshAttempts < MAX_PROGRESS_REFRESHES) {
                 if (state.phase === 'refresh-delay' && Date.now() - state.lastActionAt < 6500) return;
                 const attempt = state.refreshAttempts + 1;
@@ -1133,20 +1272,31 @@
                     lastActionAt: Date.now()
                 });
                 clearTimeout(detailRefreshTimer);
-                debugLog('info', 'detail-refresh-scheduled', { attempt, delayMs: 6500, progress: currentLesson.progress });
-                detailRefreshTimer = setTimeout(() => location.reload(), 6500);
+                debugLog('info', 'server-status-probe-rescheduled', {
+                    attempt,
+                    delayMs: 6500,
+                    progress: currentLesson.progress,
+                    status: currentLesson.status
+                });
+                detailRefreshTimer = setTimeout(() => {
+                    const latest = getState();
+                    if (latest.status !== 'running' || !isDetailRoute()) return;
+                    updateState({ phase: 'checking-progress', message: '实时复查服务器“已完成”状态', lastActionAt: Date.now() });
+                    reloadServerStatusFrame('retry-after-video-close');
+                    scheduleMainTick();
+                }, 6500);
                 return;
             } else {
                 state = updateState({
                     status: 'paused',
                     phase: 'completion-pending',
-                    message: `进度仍为 ${currentLesson.progress}%，将重新打开当前课程`,
+                    message: `服务器仍未标记“已完成”（当前 ${currentLesson.progress}%），不会进入下一节`,
                     currentLessonProgress: currentLesson.progress,
                     refreshAttempts: 0,
                     lastActionAt: 0
                 });
                 updateState({
-                    message: `服务器尚未确认完成（当前 ${currentLesson.progress}%）；播放器保持打开，请稍后点“重新检查”`
+                    message: `服务器尚未确认“已完成”（当前 ${currentLesson.progress}%）；请稍后点“重新检查”`
                 });
                 debugLog('warn', 'server-completion-not-confirmed', {
                     lesson: currentLesson.title,
@@ -1394,21 +1544,20 @@
             const reason = event.type === 'video-ended'
                 ? '视频已结束'
                 : event.type === 'video-stalled'
-                    ? '播放器长时间无进度，已关闭并准备重试'
+                    ? '播放器长时间无进度，等待服务器“已完成”状态'
                     : '播放器窗口已关闭';
             updateState({
-                phase: 'awaiting-detail-refresh',
-                message: `${reason}，等待服务器保存进度`,
+                phase: event.type === 'video-ended' ? 'watching-video' : 'checking-progress',
+                message: `${reason}，实时等待服务器标记“已完成”`,
                 lastActionAt: Date.now(),
                 skipRequestAt: 0
             });
             clearTimeout(detailRefreshTimer);
-            detailRefreshTimer = setTimeout(() => {
-                const latest = getState();
-                if (latest.status !== 'running' || !isDetailRoute()) return;
-                updateState({ phase: 'checking-progress', message: '刷新专题详情并检查完成状态', lastActionAt: Date.now() });
-                location.reload();
-            }, DETAIL_REFRESH_DELAY_MS);
+            if (event.type === 'video-ended') {
+                reloadServerStatusFrame('video-ended');
+            } else {
+                scheduleMainTick();
+            }
         }
     }
 
