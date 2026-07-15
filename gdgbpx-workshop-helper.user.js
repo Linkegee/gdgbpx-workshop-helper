@@ -46,7 +46,6 @@
     const MAIN_HOST = 'gbpx.gd.gov.cn';
     const PLAYER_HOSTS = new Set(['wcs1.shawcoder.xyz', 'cs1.gdgbpx.com']);
     const TICK_MS = 1200;
-    const MAX_PROGRESS_REFRESHES = 4;
     // Do not reload the visible Vue detail page while a player is active. The
     // hidden same-origin probe below is used for server-status polling instead.
     const SERVER_STATUS_PROBE_INTERVAL_MS = 6500;
@@ -1261,12 +1260,12 @@
                 // explicit 已完成 status may request a player close.
                 confirmServerCompletion(currentLesson, 'visible-detail-dom');
                 return;
-            } else if (state.refreshAttempts < MAX_PROGRESS_REFRESHES) {
+            } else {
                 if (state.phase === 'refresh-delay' && Date.now() - state.lastActionAt < 6500) return;
-                const attempt = state.refreshAttempts + 1;
+                const attempt = Math.min(9999, Number(state.refreshAttempts || 0) + 1);
                 updateState({
                     phase: 'refresh-delay',
-                    message: `服务器进度尚未更新，${attempt}/${MAX_PROGRESS_REFRESHES} 次复查`,
+                    message: `等待服务器标记“已完成”（第 ${attempt} 次实时复查）`,
                     currentLessonProgress: currentLesson.progress,
                     refreshAttempts: attempt,
                     lastActionAt: Date.now()
@@ -1285,24 +1284,6 @@
                     reloadServerStatusFrame('retry-after-video-close');
                     scheduleMainTick();
                 }, 6500);
-                return;
-            } else {
-                state = updateState({
-                    status: 'paused',
-                    phase: 'completion-pending',
-                    message: `服务器仍未标记“已完成”（当前 ${currentLesson.progress}%），不会进入下一节`,
-                    currentLessonProgress: currentLesson.progress,
-                    refreshAttempts: 0,
-                    lastActionAt: 0
-                });
-                updateState({
-                    message: `服务器尚未确认“已完成”（当前 ${currentLesson.progress}%）；请稍后点“重新检查”`
-                });
-                debugLog('warn', 'server-completion-not-confirmed', {
-                    lesson: currentLesson.title,
-                    progress: currentLesson.progress,
-                    attempts: MAX_PROGRESS_REFRESHES
-                });
                 return;
             }
         }
