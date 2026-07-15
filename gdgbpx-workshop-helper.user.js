@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.10
+// @version      1.5.11
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.10';
+    const VERSION = '1.5.11';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -173,6 +173,24 @@
             merged.message = '已升级完成判定；正在重新核验服务器进度并恢复播放';
             merged.completedCloseRequestAt = 0;
             merged.completedCloseAttempts = 0;
+        }
+        // v1.5.9 could accept tail events from an already completed player after
+        // clearing the active lesson, leaving an impossible paused state with no
+        // lesson to verify. Resume directly from the detail list on upgrade.
+        if (merged.phase === 'completion-unverified'
+            && !merged.currentLessonKey
+            && !merged.currentLessonTitle
+            && merged.serverCompletedLessonKeys.length) {
+            merged.status = 'running';
+            merged.phase = 'detail-ready';
+            merged.message = '已修复旧播放器尾随事件，继续选择下一节';
+            merged.refreshAttempts = 0;
+            merged.completedCloseRequestAt = 0;
+            merged.completedCloseAttempts = 0;
+            merged.completedCloseStartedAt = 0;
+            merged.closingPlayerSessionId = '';
+            merged.closingPlayerLastSeenAt = 0;
+            merged.closingPlayerUnloadAt = 0;
         }
         // 实测站点按实际学习时长记进度，倍速会导致视频结束但课程仍未完成。
         merged.settings.playbackRate = 1;
