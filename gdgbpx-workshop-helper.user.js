@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.5
+// @version      1.5.6
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -21,17 +21,22 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @connect      127.0.0.1
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.5.5';
+    const VERSION = '1.5.6';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
+    const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
+    const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
+    const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js';
+    const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const LIST_SECTION_KEY = 'gdgbpx_workshop_helper_list_section_v1';
     const LIST_SECTION_TTL_MS = 30 * 60 * 1000;
     const MAX_LOG_ENTRIES = 600;
@@ -203,6 +208,79 @@
         return location.href
             .replace(/([?&#](?:token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
             .slice(0, 500);
+    }
+
+    function isNewerVersion(candidate, current = VERSION) {
+        const candidateParts = String(candidate).split('.').map((part) => Number.parseInt(part, 10));
+        const currentParts = String(current).split('.').map((part) => Number.parseInt(part, 10));
+        const length = Math.max(candidateParts.length, currentParts.length);
+        for (let index = 0; index < length; index += 1) {
+            const candidatePart = Number.isFinite(candidateParts[index]) ? candidateParts[index] : 0;
+            const currentPart = Number.isFinite(currentParts[index]) ? currentParts[index] : 0;
+            if (candidatePart > currentPart) return true;
+            if (candidatePart < currentPart) return false;
+        }
+        return false;
+    }
+
+    function getAvailableUpdate() {
+        const available = GM_getValue(UPDATE_AVAILABLE_KEY, null);
+        if (!available || typeof available !== 'object' || !isNewerVersion(available.version)) {
+            if (available) GM_deleteValue(UPDATE_AVAILABLE_KEY);
+            return null;
+        }
+        return available;
+    }
+
+    function checkForScriptUpdate(force = false) {
+        const now = Date.now();
+        const lastCheckAt = Number(GM_getValue(UPDATE_CHECK_KEY, 0) || 0);
+        if (!force && now - lastCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
+        GM_setValue(UPDATE_CHECK_KEY, now);
+        debugLog('info', 'script-update-check-started', { force, currentVersion: VERSION });
+        new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${UPDATE_URL}?_gbpx_update_check=${now}`,
+                headers: { 'Cache-Control': 'no-cache' },
+                timeout: 10000,
+                anonymous: true,
+                onload(response) {
+                    if (response.status < 200 || response.status >= 300) {
+                        reject(new Error(`HTTP ${response.status}`));
+                        return;
+                    }
+                    resolve(response.responseText || '');
+                },
+                onerror() { reject(new Error('网络请求失败')); },
+                ontimeout() { reject(new Error('检查更新超时')); }
+            });
+        }).then((source) => {
+            const match = source.match(/^\/\/\s*@version\s+([^\s]+)\s*$/m);
+            if (!match) throw new Error('远程脚本缺少 @version');
+            const remoteVersion = match[1];
+            if (isNewerVersion(remoteVersion)) {
+                const available = { version: remoteVersion, url: UPDATE_URL, checkedAt: Date.now() };
+                GM_setValue(UPDATE_AVAILABLE_KEY, available);
+                debugLog('info', 'script-update-available', {
+                    currentVersion: VERSION,
+                    remoteVersion
+                });
+                renderPanel(getState());
+                if (force) window.alert(`发现新版本 ${remoteVersion}，请点击助手面板中的“安装更新”。`);
+                return;
+            }
+            GM_deleteValue(UPDATE_AVAILABLE_KEY);
+            debugLog('info', 'script-update-current', {
+                currentVersion: VERSION,
+                remoteVersion
+            });
+            renderPanel(getState());
+            if (force) window.alert(`当前已是最新版本 ${VERSION}。`);
+        }).catch((error) => {
+            debugLog('warn', 'script-update-check-failed', { force, error });
+            if (force) window.alert(`检查更新失败：${error.message || error}`);
+        });
     }
 
     function sanitizeLogValue(value, depth = 0) {
@@ -537,6 +615,7 @@
         GM_registerMenuCommand('复制诊断日志', copyLogs);
         GM_registerMenuCommand('下载诊断日志', downloadLogs);
         GM_registerMenuCommand('清空诊断日志', clearLogs);
+        GM_registerMenuCommand('检查脚本更新', () => checkForScriptUpdate(true));
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
             handlePlayerEvent(value);
@@ -554,6 +633,7 @@
         const observer = new MutationObserver(scheduleMainTick);
         observer.observe(document.documentElement, { childList: true, subtree: true });
         scheduleMainTick();
+        setTimeout(() => checkForScriptUpdate(false), 3000);
         debugLog('info', 'server-progress-monitor-mode', {
             mode: 'hidden-same-origin-iframe',
             intervalMs: SERVER_STATUS_PROBE_INTERVAL_MS,
@@ -581,6 +661,8 @@
             #gbpx-helper-panel .gbpx-title { color:#a40000; font-weight:700; }
             #gbpx-helper-panel .gbpx-close { border:0; background:transparent; cursor:pointer; font-size:18px; }
             #gbpx-helper-panel .gbpx-status { padding:8px; margin:6px 0; background:#f7f7f7; border-radius:5px; word-break:break-all; }
+            #gbpx-helper-panel .gbpx-update-notice { display:block; width:100%; margin:6px 0; padding:7px 8px; border:1px solid #d48b00; border-radius:5px; color:#7a4100; background:#fff5d6; cursor:pointer; font-weight:700; }
+            #gbpx-helper-panel .gbpx-update-notice[hidden] { display:none; }
             #gbpx-helper-panel .gbpx-meta { color:#666; font-size:12px; margin:3px 0; word-break:break-all; }
             #gbpx-helper-panel .gbpx-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:10px 0; }
             #gbpx-helper-panel button.gbpx-action { border:0; border-radius:4px; padding:7px 4px; color:#fff; cursor:pointer; background:#b30000; }
@@ -606,6 +688,7 @@
                 <button class="gbpx-close" type="button" title="隐藏面板">×</button>
             </div>
             <div class="gbpx-status" data-role="status"></div>
+            <button class="gbpx-update-notice" type="button" data-action="installupdate" hidden></button>
             <div class="gbpx-meta" data-role="workshop"></div>
             <div class="gbpx-meta" data-role="lesson"></div>
             <div class="gbpx-buttons">
@@ -725,6 +808,12 @@
             idle: '未开始', running: '运行中', paused: '已暂停', stopped: '已停止', complete: '全部完成'
         };
         panel.querySelector('[data-role="status"]').textContent = `${statusNames[state.status] || state.status}：${state.message}`;
+        const updateNotice = panel.querySelector('[data-action="installupdate"]');
+        const availableUpdate = getAvailableUpdate();
+        updateNotice.hidden = !availableUpdate;
+        updateNotice.textContent = availableUpdate
+            ? `发现新版本 ${availableUpdate.version}，点击安装更新`
+            : '';
         panel.querySelector('[data-role="workshop"]').textContent = state.currentWorkshopTitle
             ? `专题：${state.currentWorkshopTitle}`
             : `页面：${isListRoute() ? '在学列表' : isDetailRoute() ? '专题详情' : '其他页面'}`;
@@ -758,6 +847,16 @@
         }
         if (action === 'clearlog') {
             clearLogs();
+            return;
+        }
+        if (action === 'installupdate') {
+            const availableUpdate = getAvailableUpdate();
+            const updateUrl = availableUpdate?.url || UPDATE_URL;
+            debugLog('info', 'script-update-install-opened', {
+                currentVersion: VERSION,
+                remoteVersion: availableUpdate?.version || 'unknown'
+            });
+            GM_openInTab(updateUrl, { active: true, insert: true, setParent: true });
             return;
         }
         if (action === 'start') {
