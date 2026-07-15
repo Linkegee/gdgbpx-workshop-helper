@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.2
+// @version      1.5.3
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -27,7 +27,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.2';
+    const VERSION = '1.5.3';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -81,6 +81,7 @@
     let serverStatusFrameKey = '';
     let serverStatusFrameReady = false;
     let serverStatusMonitorTimer = null;
+    let serverStatusProbeRetryTimer = null;
     let serverStatusProbeStartedAt = 0;
     let lastServerStatusSnapshot = '';
     const logThrottle = new Map();
@@ -998,6 +999,10 @@
             clearInterval(serverStatusMonitorTimer);
             serverStatusMonitorTimer = null;
         }
+        if (serverStatusProbeRetryTimer) {
+            clearTimeout(serverStatusProbeRetryTimer);
+            serverStatusProbeRetryTimer = null;
+        }
         if (serverStatusFrame) {
             serverStatusFrame.remove();
             serverStatusFrame = null;
@@ -1013,6 +1018,10 @@
 
     function reloadServerStatusFrame(reason = 'interval') {
         if (!serverStatusFrame) return false;
+        if (serverStatusProbeRetryTimer) {
+            clearTimeout(serverStatusProbeRetryTimer);
+            serverStatusProbeRetryTimer = null;
+        }
         serverStatusFrameReady = false;
         serverStatusProbeStartedAt = Date.now();
         serverStatusFrame.src = serverStatusProbeUrl();
@@ -1058,7 +1067,13 @@
                     readyState: serverStatusFrame.contentDocument.readyState
                 });
                 serverStatusProbeStartedAt = Date.now();
-                reloadServerStatusFrame('empty-timeout');
+                return;
+            }
+            if (!serverStatusProbeRetryTimer) {
+                serverStatusProbeRetryTimer = setTimeout(() => {
+                    serverStatusProbeRetryTimer = null;
+                    readServerStatusProbeDocument();
+                }, 500);
             }
             return;
         }
