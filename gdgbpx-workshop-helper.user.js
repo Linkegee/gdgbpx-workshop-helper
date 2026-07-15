@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.4
+// @version      1.5.5
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -27,7 +27,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.4';
+    const VERSION = '1.5.5';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -71,6 +71,7 @@
     let lastPlayerWaitLogAt = 0;
     let lastDomSummary = '';
     let lastAutoScrolledLessonKey = '';
+    let lastLessonSelectionSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
     let bridgeFlushTimer = null;
@@ -1041,6 +1042,8 @@
         const state = getState();
         if (!lesson?.complete || state.status !== 'running' || !state.currentLessonTitle) return false;
         if (lesson.title !== state.currentLessonTitle || state.phase === 'closing-completed-player') return false;
+        const completedKey = lessonKey(state.currentClassId || currentClassId(), lesson.title);
+        const completedLessonKeys = uniqueAppend(state.serverCompletedLessonKeys, completedKey);
         updateState({
             phase: 'closing-completed-player',
             message: `服务器已确认完成：${lesson.title}；正在关闭播放器`,
@@ -1049,16 +1052,15 @@
             lastActionAt: Date.now(),
             completedCloseRequestAt: Date.now(),
             completedCloseAttempts: 1,
-            serverCompletedLessonKeys: uniqueAppend(
-                state.serverCompletedLessonKeys,
-                lessonKey(state.currentClassId || currentClassId(), lesson.title)
-            )
+            serverCompletedLessonKeys: completedLessonKeys
         });
         debugLog('info', 'server-completion-confirmed-close-requested', {
             source,
+            lessonKey: completedKey,
             lesson: lesson.title,
             status: lesson.status,
-            progress: lesson.progress
+            progress: lesson.progress,
+            serverCompletedLessonKeys: completedLessonKeys
         });
         stopServerStatusMonitor('completion-confirmed');
         return true;
@@ -1233,6 +1235,7 @@
             lessons: lessons.map((lesson) => ({ title: lesson.title, progress: lesson.progress, status: lesson.status }))
         });
         if (state.currentClassId !== classId) {
+            lastLessonSelectionSnapshot = '';
             state = updateState({
                 currentClassId: classId,
                 phase: 'detail-ready',
@@ -1343,8 +1346,11 @@
                     completedCloseRequestAt: 0
                 });
                 debugLog('warn', 'completed-player-close-not-confirmed', {
+                    lessonKey: lessonKey(state.currentClassId, state.currentLessonTitle),
                     lesson: state.currentLessonTitle,
-                    waitedMs: age
+                    waitedMs: age,
+                    phase: state.phase,
+                    completedCloseAttempts: state.completedCloseAttempts
                 });
                 return;
             }
@@ -1391,6 +1397,47 @@
         const serverCompletedLessonKeys = Array.isArray(state.serverCompletedLessonKeys)
             ? state.serverCompletedLessonKeys
             : [];
+        const selectionRows = lessons.map((lesson) => {
+            const key = lessonKey(classId, lesson.title);
+            const isServerCompleted = serverCompletedLessonKeys.includes(key);
+            const isSkipped = state.skippedLessonKeys.includes(key);
+            const reason = lesson.complete
+                ? 'dom-complete'
+                : isServerCompleted
+                    ? 'server-completed-memory'
+                    : isSkipped
+                        ? 'skipped-memory'
+                        : 'eligible';
+            return {
+                index: lesson.index,
+                lessonKey: key,
+                title: lesson.title,
+                status: lesson.status,
+                progress: lesson.progress,
+                complete: lesson.complete,
+                isServerCompleted,
+                isSkipped,
+                reason
+            };
+        });
+        const selectionSnapshot = JSON.stringify({
+            classId,
+            phase: state.phase,
+            currentLessonKey: state.currentLessonKey,
+            rows: selectionRows.map((row) => [row.lessonKey, row.status, row.progress, row.reason])
+        });
+        if (selectionSnapshot !== lastLessonSelectionSnapshot) {
+            lastLessonSelectionSnapshot = selectionSnapshot;
+            debugLog('info', 'lesson-selection-evaluated', {
+                classId,
+                phase: state.phase,
+                currentLessonKey: state.currentLessonKey,
+                currentLessonTitle: state.currentLessonTitle,
+                serverCompletedLessonKeys,
+                skippedLessonKeys: state.skippedLessonKeys,
+                rows: selectionRows
+            });
+        }
         const unfinished = lessons.filter((lesson) => {
             if (lesson.complete) return false;
             return !serverCompletedLessonKeys.includes(lessonKey(classId, lesson.title));
@@ -1414,6 +1461,13 @@
             return !state.skippedLessonKeys.includes(key) && !serverCompletedLessonKeys.includes(key);
         });
         if (!nextLesson) {
+            debugLog('warn', 'lesson-selection-no-candidate', {
+                classId,
+                lessonCount: lessons.length,
+                serverCompletedLessonKeys,
+                skippedLessonKeys: state.skippedLessonKeys,
+                rows: selectionRows
+            });
             updateState({
                 status: 'paused', phase: 'all-unfinished-skipped',
                 message: '当前专题剩余未完成课程均已被本轮跳过；点击“开始”可清除跳过记录重试'
@@ -1438,8 +1492,14 @@
         debugLog('info', 'lesson-open-click', {
             classId,
             index: nextLesson.index,
+            lessonKey: key,
             title: nextLesson.title,
-            progress: nextLesson.progress
+            status: nextLesson.status,
+            complete: nextLesson.complete,
+            progress: nextLesson.progress,
+            currentLessonKey: state.currentLessonKey,
+            serverCompletedLessonKeys,
+            skippedLessonKeys: state.skippedLessonKeys
         });
         nextLesson.titleElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
         setTimeout(() => nextLesson.titleElement.click(), 350);
