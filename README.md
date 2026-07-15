@@ -1,4 +1,4 @@
-# 广东省干部培训网络学院专题学习助手
+# 学院专题学习助手
 
 本目录中的 `gdgbpx-workshop-helper.user.js` 是针对新版“专题学习”Vue 页面重新编写的独立 Tampermonkey 脚本，不依赖三份旧脚本。
 
