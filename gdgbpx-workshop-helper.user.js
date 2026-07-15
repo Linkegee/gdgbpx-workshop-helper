@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.7
+// @version      1.5.8
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,13 +28,15 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.7';
+    const VERSION = '1.5.8';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
     const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
+    const PLAYER_HEARTBEAT_KEY = 'gdgbpx_workshop_helper_player_heartbeat_v1';
+    const PLAYER_IDENTITY_SESSION_KEY = 'gdgbpxPlayerIdentityV1';
     const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js';
     const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const LIST_SECTION_KEY = 'gdgbpx_workshop_helper_list_section_v1';
@@ -59,6 +61,9 @@
     const COMPLETED_CLOSE_GRACE_MS = 60000;
     const MAX_COMPLETED_CLOSE_RETRIES = 5;
     const PLAYER_REOPEN_COOLDOWN_MS = 3000;
+    const PLAYER_HEARTBEAT_INTERVAL_MS = 1500;
+    const PLAYER_CLOSE_HEARTBEAT_SILENCE_MS = 10000;
+    const PLAYER_CLOSE_MIN_CONFIRM_MS = 4000;
 
     let mainTickTimer = null;
     let detailRefreshTimer = null;
@@ -93,6 +98,9 @@
     let lastServerStatusSnapshot = '';
     const logThrottle = new Map();
     let playerLessonKey = '';
+    let playerLessonTitle = '';
+    let playerSessionId = '';
+    let lastPlayerHeartbeatWriteAt = 0;
     let emptyStudyingListSeenAt = 0;
     let playerRecoverySeekApplied = false;
 
@@ -103,6 +111,7 @@
             phase: 'idle',
             message: '请进入“专题学习 → 在学”，然后点击开始',
             currentWorkshopTitle: '',
+            currentWorkshopLessonTitles: [],
             currentClassId: '',
             currentLessonTitle: '',
             currentLessonKey: '',
@@ -119,6 +128,10 @@
             stopRequestAt: 0,
             completedCloseRequestAt: 0,
             completedCloseAttempts: 0,
+            completedCloseStartedAt: 0,
+            closingPlayerSessionId: '',
+            closingPlayerLastSeenAt: 0,
+            closingPlayerUnloadAt: 0,
             serverCompletedLessonKeys: [],
             settings: {
                 playbackRate: 1,
@@ -140,6 +153,9 @@
             settings: { ...base.settings, ...(saved.settings || {}) },
             finishedWorkshopTitles: Array.isArray(saved.finishedWorkshopTitles)
                 ? saved.finishedWorkshopTitles
+                : [],
+            currentWorkshopLessonTitles: Array.isArray(saved.currentWorkshopLessonTitles)
+                ? saved.currentWorkshopLessonTitles
                 : [],
             skippedLessonKeys: Array.isArray(saved.skippedLessonKeys)
                 ? saved.skippedLessonKeys
@@ -193,6 +209,8 @@
             type,
             at: Date.now(),
             lessonKey: PLAYER_HOSTS.has(location.hostname) ? playerLessonKey : '',
+            lessonTitle: PLAYER_HOSTS.has(location.hostname) ? playerLessonTitle : '',
+            playerSessionId: PLAYER_HOSTS.has(location.hostname) ? playerSessionId : '',
             ...detail
         };
         debugLog('info', 'publish-event', { type, detail });
@@ -626,7 +644,7 @@
         window.addEventListener('focus', () => {
             const state = getState();
             if (state.status === 'running' && ['opening-video', 'watching-video'].includes(state.phase)) {
-                updateState({ message: '播放器窗口已返回，等待完成信号或重新检查进度' });
+                updateState({ message: '主页面已获得焦点；播放器状态仍以对应会话心跳为准' });
             }
             scheduleMainTick();
         });
@@ -881,6 +899,10 @@
                 stopRequestAt: 0,
                 completedCloseRequestAt: 0,
                 completedCloseAttempts: 0,
+                completedCloseStartedAt: 0,
+                closingPlayerSessionId: '',
+                closingPlayerLastSeenAt: 0,
+                closingPlayerUnloadAt: 0,
                 serverCompletedLessonKeys: freshRun ? [] : state.serverCompletedLessonKeys,
                 openAttempts: 0,
                 fallbackOpenAttempted: false
@@ -910,6 +932,10 @@
                 currentLessonKey: continueAfterManualClose ? '' : state.currentLessonKey,
                 completedCloseRequestAt: 0,
                 completedCloseAttempts: 0,
+                completedCloseStartedAt: 0,
+                closingPlayerSessionId: '',
+                closingPlayerLastSeenAt: 0,
+                closingPlayerUnloadAt: 0,
                 message: '继续运行'
             });
             if (retryPlayerOpen && openCurrentLessonFromUserGesture()) return;
@@ -935,6 +961,10 @@
                 skipRequestAt: Date.now(),
                 completedCloseRequestAt: 0,
                 completedCloseAttempts: 0,
+                completedCloseStartedAt: 0,
+                closingPlayerSessionId: '',
+                closingPlayerLastSeenAt: 0,
+                closingPlayerUnloadAt: 0,
                 message: `本轮跳过：${state.currentLessonTitle}`,
                 currentLessonTitle: '',
                 currentLessonKey: '',
@@ -1032,6 +1062,7 @@
                 message: `进入第 ${page} 页专题`,
                 currentPage: page,
                 currentWorkshopTitle: nextCard.title,
+                currentWorkshopLessonTitles: [],
                 currentClassId: '',
                 currentLessonTitle: '',
                 currentLessonKey: '',
@@ -1144,14 +1175,21 @@
         if (lesson.title !== state.currentLessonTitle || state.phase === 'closing-completed-player') return false;
         const completedKey = lessonKey(state.currentClassId || currentClassId(), lesson.title);
         const completedLessonKeys = uniqueAppend(state.serverCompletedLessonKeys, completedKey);
+        const now = Date.now();
+        const heartbeat = getPlayerHeartbeat();
+        const matchingHeartbeat = heartbeat?.lessonKey === completedKey ? heartbeat : null;
         updateState({
             phase: 'closing-completed-player',
             message: `服务器已确认完成：${lesson.title}；正在关闭播放器`,
             currentLessonProgress: lesson.progress,
             refreshAttempts: 0,
-            lastActionAt: Date.now(),
-            completedCloseRequestAt: Date.now(),
+            lastActionAt: now,
+            completedCloseRequestAt: now,
             completedCloseAttempts: 1,
+            completedCloseStartedAt: now,
+            closingPlayerSessionId: matchingHeartbeat?.sessionId || '',
+            closingPlayerLastSeenAt: Number(matchingHeartbeat?.at || 0),
+            closingPlayerUnloadAt: 0,
             serverCompletedLessonKeys: completedLessonKeys
         });
         debugLog('info', 'server-completion-confirmed-close-requested', {
@@ -1160,10 +1198,39 @@
             lesson: lesson.title,
             status: lesson.status,
             progress: lesson.progress,
+            playerSessionId: matchingHeartbeat?.sessionId || '',
+            heartbeatAgeMs: matchingHeartbeat ? now - Number(matchingHeartbeat.at || 0) : null,
             serverCompletedLessonKeys: completedLessonKeys
         });
         stopServerStatusMonitor('completion-confirmed');
         return true;
+    }
+
+    function confirmCompletedPlayerClosed(state, reason, heartbeat = null) {
+        clearTimeout(detailRefreshTimer);
+        updateState({
+            phase: 'detail-ready',
+            message: '已确认播放器停止响应，准备下一节',
+            currentLessonTitle: '',
+            currentLessonKey: '',
+            currentLessonProgress: 100,
+            refreshAttempts: 0,
+            completedCloseRequestAt: 0,
+            completedCloseAttempts: 0,
+            completedCloseStartedAt: 0,
+            closingPlayerSessionId: '',
+            closingPlayerLastSeenAt: 0,
+            closingPlayerUnloadAt: 0,
+            lastActionAt: Date.now()
+        });
+        debugLog('info', 'completed-player-close-confirmed', {
+            lessonKey: state.currentLessonKey,
+            playerSessionId: state.closingPlayerSessionId || heartbeat?.sessionId || '',
+            reason,
+            lastHeartbeatAt: heartbeat?.at || state.closingPlayerLastSeenAt || 0,
+            heartbeatSilenceMs: heartbeat?.at ? Date.now() - Number(heartbeat.at) : null
+        });
+        setTimeout(scheduleMainTick, PLAYER_REOPEN_COOLDOWN_MS);
     }
 
     function readServerStatusProbeDocument() {
@@ -1334,15 +1401,19 @@
             completeCount: lessons.filter((lesson) => lesson.complete).length,
             lessons: lessons.map((lesson) => ({ title: lesson.title, progress: lesson.progress, status: lesson.status }))
         });
+        const lessonTitles = lessons.map((lesson) => lesson.title);
         if (state.currentClassId !== classId) {
             lastLessonSelectionSnapshot = '';
             lastIgnoredDetailProgressSnapshot = '';
             state = updateState({
                 currentClassId: classId,
+                currentWorkshopLessonTitles: lessonTitles,
                 phase: 'detail-ready',
                 message: `已读取 ${lessons.length} 个必修课程`,
                 serverCompletedLessonKeys: []
             });
+        } else if (JSON.stringify(state.currentWorkshopLessonTitles) !== JSON.stringify(lessonTitles)) {
+            state = updateState({ currentWorkshopLessonTitles: lessonTitles });
         }
 
         const currentLesson = lessons.find((lesson) => lesson.title === state.currentLessonTitle);
@@ -1444,6 +1515,32 @@
 
         if (['opening-video', 'watching-video', 'closing-player', 'awaiting-detail-refresh', 'closing-completed-player'].includes(state.phase)) {
             const age = Date.now() - state.lastActionAt;
+            if (state.phase === 'closing-completed-player') {
+                const now = Date.now();
+                const heartbeat = getPlayerHeartbeat();
+                const heartbeatMatches = Boolean(heartbeat)
+                    && (heartbeat.lessonKey === state.currentLessonKey
+                        || (state.closingPlayerSessionId && heartbeat.sessionId === state.closingPlayerSessionId));
+                if (heartbeatMatches && !state.closingPlayerSessionId && heartbeat.sessionId) {
+                    state = updateState({
+                        closingPlayerSessionId: heartbeat.sessionId,
+                        closingPlayerLastSeenAt: Number(heartbeat.at || 0)
+                    });
+                }
+                const lastSeenAt = Math.max(
+                    Number(state.closingPlayerLastSeenAt || 0),
+                    heartbeatMatches ? Number(heartbeat.at || 0) : 0
+                );
+                const closeStartedAt = Number(state.completedCloseStartedAt || state.completedCloseRequestAt || 0);
+                const closeAge = closeStartedAt ? now - closeStartedAt : 0;
+                const silenceAge = lastSeenAt ? now - lastSeenAt : 0;
+                if (lastSeenAt
+                    && closeAge >= PLAYER_CLOSE_MIN_CONFIRM_MS
+                    && silenceAge >= PLAYER_CLOSE_HEARTBEAT_SILENCE_MS) {
+                    confirmCompletedPlayerClosed(state, 'matching-player-heartbeat-silent', heartbeatMatches ? heartbeat : null);
+                    return;
+                }
+            }
             if (state.phase === 'closing-completed-player' && age > COMPLETED_CLOSE_RETRY_MS && Number(state.completedCloseAttempts || 1) < MAX_COMPLETED_CLOSE_RETRIES) {
                 const attempts = Number(state.completedCloseAttempts || 1) + 1;
                 const requestAt = Date.now();
@@ -1454,9 +1551,12 @@
                     message: `服务器已确认完成，正在重试关闭播放器 (${attempts}/${MAX_COMPLETED_CLOSE_RETRIES})`
                 });
                 debugLog('warn', 'completed-player-close-retry', {
+                    lessonKey: state.currentLessonKey,
                     lesson: state.currentLessonTitle,
                     attempt: attempts,
-                    waitedMs: age
+                    waitedMs: age,
+                    playerSessionId: state.closingPlayerSessionId,
+                    heartbeat: getPlayerHeartbeat()
                 });
                 return;
             }
@@ -1713,21 +1813,20 @@
             return;
         }
 
-        if (event.type === 'video-closed' && state.status === 'running' && state.phase === 'closing-completed-player') {
-            clearTimeout(detailRefreshTimer);
+        if (['video-closed', 'player-unloading'].includes(event.type)
+            && state.status === 'running'
+            && state.phase === 'closing-completed-player') {
             updateState({
-                phase: 'detail-ready',
-                message: '已确认播放器关闭，准备下一节',
-                currentLessonTitle: '',
-                currentLessonKey: '',
-                currentLessonProgress: 100,
-                refreshAttempts: 0,
-                completedCloseRequestAt: 0,
-                completedCloseAttempts: 0,
-                lastActionAt: Date.now()
+                message: '已收到播放器离开信号，等待对应会话心跳停止后再进入下一节',
+                closingPlayerSessionId: state.closingPlayerSessionId || event.playerSessionId || '',
+                closingPlayerUnloadAt: Number(event.at || Date.now())
             });
-            debugLog('info', 'completed-player-close-confirmed', { lessonKey: event.lessonKey });
-            setTimeout(scheduleMainTick, PLAYER_REOPEN_COOLDOWN_MS);
+            debugLog('info', 'completed-player-unload-observed', {
+                type: event.type,
+                lessonKey: event.lessonKey,
+                playerSessionId: event.playerSessionId,
+                note: 'unload-is-not-proof-of-window-close'
+            });
             return;
         }
 
@@ -1739,12 +1838,12 @@
             return;
         }
 
-        if (['video-ended', 'video-closed', 'video-stalled'].includes(event.type) && state.status === 'running') {
+        if (['video-ended', 'video-closed', 'player-unloading', 'video-stalled'].includes(event.type) && state.status === 'running') {
             const reason = event.type === 'video-ended'
                 ? '视频已结束'
                 : event.type === 'video-stalled'
                     ? '播放器长时间无进度，等待服务器“已完成”状态'
-                    : '播放器窗口已关闭';
+                    : '播放器页面正在离开';
             updateState({
                 phase: event.type === 'video-ended' ? 'watching-video' : 'checking-progress',
                 message: `${reason}，实时等待服务器标记“已完成”`,
@@ -1768,14 +1867,112 @@
         return `${minutes}:${secs}`;
     }
 
+    function createPlayerSessionId() {
+        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+        return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function readStoredPlayerIdentity() {
+        try {
+            const stored = JSON.parse(sessionStorage.getItem(PLAYER_IDENTITY_SESSION_KEY) || 'null');
+            if (!stored || typeof stored !== 'object' || !stored.lessonKey || !stored.sessionId) return null;
+            return stored;
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function storePlayerIdentity(identity) {
+        sessionStorage.setItem(PLAYER_IDENTITY_SESSION_KEY, JSON.stringify(identity));
+        playerSessionId = identity.sessionId;
+        playerLessonKey = identity.lessonKey;
+        playerLessonTitle = identity.lessonTitle || '';
+    }
+
+    function initializePlayerIdentity(state = getState()) {
+        const stored = readStoredPlayerIdentity();
+        const identity = stored || {
+            sessionId: createPlayerSessionId(),
+            lessonKey: state.currentLessonKey || '',
+            lessonTitle: state.currentLessonTitle || '',
+            createdAt: Date.now()
+        };
+        storePlayerIdentity(identity);
+        return { identity, source: stored ? 'session-storage' : 'state' };
+    }
+
+    function detectVisiblePlayerLessonTitle(state = getState()) {
+        const visibleText = normalizeText(document.body?.innerText || '');
+        if (!visibleText) return '';
+        const candidates = uniqueAppend(
+            Array.isArray(state.currentWorkshopLessonTitles) ? state.currentWorkshopLessonTitles : [],
+            state.currentLessonTitle
+        ).filter(Boolean).sort((left, right) => right.length - left.length);
+        return candidates.find((title) => visibleText.includes(normalizeText(title))) || '';
+    }
+
+    function syncPlayerIdentityFromVisibleTitle(state = getState()) {
+        const storedIdentity = readStoredPlayerIdentity();
+        if (storedIdentity && storedIdentity.lessonKey !== playerLessonKey) {
+            storePlayerIdentity(storedIdentity);
+        }
+        const detectedTitle = detectVisiblePlayerLessonTitle(state);
+        if (!detectedTitle || !state.currentClassId) return;
+        const detectedKey = lessonKey(state.currentClassId, detectedTitle);
+        if (detectedKey === playerLessonKey) return;
+        const previous = {
+            sessionId: playerSessionId,
+            lessonKey: playerLessonKey,
+            lessonTitle: playerLessonTitle
+        };
+        const next = {
+            sessionId: playerSessionId || createPlayerSessionId(),
+            lessonKey: detectedKey,
+            lessonTitle: detectedTitle,
+            createdAt: Date.now()
+        };
+        storePlayerIdentity(next);
+        debugLog('info', 'player-identity-updated-from-visible-title', {
+            previous,
+            next,
+            documentTitle: document.title
+        });
+    }
+
+    function writePlayerHeartbeat(force = false) {
+        if (!playerLessonKey || !playerSessionId) return;
+        const now = Date.now();
+        if (!force && now - lastPlayerHeartbeatWriteAt < PLAYER_HEARTBEAT_INTERVAL_MS) return;
+        lastPlayerHeartbeatWriteAt = now;
+        GM_setValue(PLAYER_HEARTBEAT_KEY, {
+            at: now,
+            sessionId: playerSessionId,
+            lessonKey: playerLessonKey,
+            lessonTitle: playerLessonTitle,
+            documentTitle: document.title,
+            url: sanitizedUrl(),
+            currentTime: Number(playerVideo?.currentTime || 0),
+            duration: Number(playerVideo?.duration || 0),
+            paused: Boolean(playerVideo?.paused)
+        });
+    }
+
+    function getPlayerHeartbeat() {
+        const heartbeat = GM_getValue(PLAYER_HEARTBEAT_KEY, null);
+        return heartbeat && typeof heartbeat === 'object' ? heartbeat : null;
+    }
+
     function initPlayerPage() {
         const initialState = getState();
-        playerLessonKey = initialState.currentLessonKey || '';
+        const identityResult = initializePlayerIdentity(initialState);
+        syncPlayerIdentityFromVisibleTitle(initialState);
         debugLog('info', 'player-init', {
             topLevel: window.top === window,
             readyState: document.readyState,
             lessonKey: playerLessonKey,
-            lessonTitle: initialState.currentLessonTitle,
+            lessonTitle: playerLessonTitle,
+            playerSessionId,
+            identitySource: identityResult.source,
             beforeProgress: initialState.beforeProgress,
             currentLessonProgress: initialState.currentLessonProgress
         });
@@ -1787,7 +1984,11 @@
             window.addEventListener('beforeunload', () => {
                 const state = getState();
                 if (['running', 'paused'].includes(state.status)) {
-                    publishEvent('video-closed');
+                    publishEvent('player-unloading', {
+                        documentTitle: document.title,
+                        currentTime: Number(playerVideo?.currentTime || 0),
+                        duration: Number(playerVideo?.duration || 0)
+                    });
                 }
             });
             const layerObserver = new MutationObserver(() => {
@@ -1803,11 +2004,14 @@
         }
 
         playerTimer = setInterval(playerTick, 1000);
+        writePlayerHeartbeat(true);
         playerTick();
     }
 
     function playerTick() {
         const state = getState();
+        syncPlayerIdentityFromVisibleTitle(state);
+        writePlayerHeartbeat();
         dismissKnownContinuePrompt();
         const video = document.querySelector('video');
         if (video && video !== playerVideo) attachVideo(video);
