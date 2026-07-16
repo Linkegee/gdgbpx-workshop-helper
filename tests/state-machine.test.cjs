@@ -15,6 +15,8 @@ source = source.replace(
         resolveCoursePlayerUrl,
         openLessonPlayer,
         handleDetailPage,
+        setFallbackPlayerTab(value) { fallbackPlayerTab = value; },
+        getManagedPlayerCloseRequestedAt() { return managedPlayerCloseRequestedAt; },
         setDetailRefreshTimer(value) { detailRefreshTimer = value; },
         getDetailRefreshTimer() { return detailRefreshTimer; }
     };
@@ -40,6 +42,7 @@ const context = {
     clearTimeout,
     setInterval,
     clearInterval,
+    queueMicrotask,
     URL,
     Blob,
     Date,
@@ -132,6 +135,40 @@ helper.handleDetailPage(helper.getState());
 assert.equal(helper.getState().phase, 'watching-video',
     'an empty Vue detail DOM during reload must preserve the active player phase');
 
+let managedCloseCalls = 0;
+values.set('gdgbpx_workshop_helper_state_v1', {
+    ...runningState('closing-completed-player'),
+    closingPlayerSessionId: 'managed-player-1',
+    serverCompletedLessonKeys: ['class-1::测试课程']
+});
+helper.setFallbackPlayerTab({ close() { managedCloseCalls += 1; } });
+helper.handlePlayerEvent({
+    id: 'managed-player-closing',
+    type: 'player-closing',
+    at: Date.now(),
+    lessonKey: 'class-1::测试课程',
+    lessonTitle: '测试课程',
+    playerSessionId: 'managed-player-1'
+});
+assert.equal(managedCloseCalls, 1, 'the managed tab handle must receive a close request');
+assert.ok(helper.getManagedPlayerCloseRequestedAt() > 0);
+helper.handlePlayerEvent({
+    id: 'managed-player-unloading',
+    type: 'player-unloading',
+    at: Date.now(),
+    lessonKey: 'class-1::测试课程',
+    lessonTitle: '测试课程',
+    playerSessionId: 'managed-player-1'
+});
+assert.equal(helper.getState().phase, 'detail-ready',
+    'a matching unload after a managed close request must confirm closure immediately');
+assert.equal(helper.getState().currentLessonKey, '');
+values.set('gdgbpx_workshop_helper_state_v1', {
+    ...helper.getState(),
+    status: 'stopped',
+    phase: 'stopped'
+});
+
 function runningState(phase) {
     return {
         ...helper.defaultState(),
@@ -199,5 +236,11 @@ assert.equal(helper.shouldRecoverPausedVideoImmediately(
     { ...runningState('closing-completed-player'), completedCloseRequestAt: Date.now() },
     false
 ), false, 'a server-confirmed close request must suppress immediate recovery');
+
+values.set('gdgbpx_workshop_helper_state_v1', {
+    ...helper.getState(),
+    status: 'stopped',
+    phase: 'stopped'
+});
 
 console.log('state-machine regression tests passed');

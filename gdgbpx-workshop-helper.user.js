@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.17
+// @version      1.5.18
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.17';
+    const VERSION = '1.5.18';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -89,6 +89,7 @@
     let lastVisibleProbeSyncSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
+    let managedPlayerCloseRequestedAt = 0;
     let bridgeFlushTimer = null;
     let bridgeSending = false;
     let bridgeConnected = false;
@@ -1320,6 +1321,7 @@
 
     function confirmCompletedPlayerClosed(state, reason, heartbeat = null) {
         clearTimeout(detailRefreshTimer);
+        managedPlayerCloseRequestedAt = 0;
         updateState({
             phase: 'detail-ready',
             message: '已确认播放器停止响应，准备下一节',
@@ -1333,7 +1335,7 @@
             closingPlayerSessionId: '',
             closingPlayerLastSeenAt: 0,
             closingPlayerUnloadAt: 0,
-            lastActionAt: Date.now()
+            lastActionAt: 0
         });
         debugLog('info', 'completed-player-close-confirmed', {
             lessonKey: state.currentLessonKey,
@@ -1342,7 +1344,10 @@
             lastHeartbeatAt: heartbeat?.at || state.closingPlayerLastSeenAt || 0,
             heartbeatSilenceMs: heartbeat?.at ? Date.now() - Number(heartbeat.at) : null
         });
-        setTimeout(scheduleMainTick, PLAYER_REOPEN_COOLDOWN_MS);
+        // This function only runs after the completed player has been confirmed
+        // gone. Continue in the same event turn so Chrome background timer
+        // throttling cannot add another 30-60 second gap before the next lesson.
+        queueMicrotask(mainTick);
     }
 
     function readServerStatusProbeDocument() {
@@ -2042,6 +2047,7 @@
                 openAttempts: 0,
                 fallbackOpenAttempted: false
             });
+            managedPlayerCloseRequestedAt = 0;
             return;
         }
 
@@ -2081,6 +2087,7 @@
         if (event.type === 'player-closing' && fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
             try {
                 fallbackPlayerTab.close();
+                managedPlayerCloseRequestedAt = Date.now();
                 debugLog('info', 'player-open-fallback-closed');
             } catch (error) {
                 debugLog('warn', 'player-open-fallback-close-failed', { error });
@@ -2101,7 +2108,7 @@
         if (['video-closed', 'player-unloading'].includes(event.type)
             && state.status === 'running'
             && state.phase === 'closing-completed-player') {
-            updateState({
+            const nextState = updateState({
                 message: '已收到播放器离开信号，等待对应会话心跳停止后再进入下一节',
                 closingPlayerSessionId: state.closingPlayerSessionId || event.playerSessionId || '',
                 closingPlayerUnloadAt: Number(event.at || Date.now())
@@ -2112,6 +2119,21 @@
                 playerSessionId: event.playerSessionId,
                 note: 'unload-is-not-proof-of-window-close'
             });
+            const managedCloseAge = managedPlayerCloseRequestedAt
+                ? Date.now() - managedPlayerCloseRequestedAt
+                : Number.POSITIVE_INFINITY;
+            if (managedCloseAge >= 0 && managedCloseAge <= 15000) {
+                debugLog('info', 'managed-player-close-confirmed-by-unload', {
+                    lessonKey: event.lessonKey,
+                    playerSessionId: event.playerSessionId,
+                    managedCloseAgeMs: managedCloseAge
+                });
+                confirmCompletedPlayerClosed(
+                    nextState,
+                    'managed-tab-close-request-and-matching-unload',
+                    getPlayerHeartbeat()
+                );
+            }
             return;
         }
 
