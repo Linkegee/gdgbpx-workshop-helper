@@ -14,6 +14,7 @@ source = source.replace(
         shouldRecoverPausedVideoImmediately,
         resolveCoursePlayerUrl,
         openLessonPlayer,
+        handleDetailPage,
         setDetailRefreshTimer(value) { detailRefreshTimer = value; },
         getDetailRefreshTimer() { return detailRefreshTimer; }
     };
@@ -117,6 +118,19 @@ assert.equal(primaryOpenMethod, 'managed-tab', 'the managed extension tab must b
 assert.equal(openedTabs.length, 1);
 assert.equal(new URL(openedTabs[0].url).searchParams.get('courseId'), 'player-resource-456');
 assert.equal(openedTabs[0].options.active, true);
+
+const emptyDetailPlayingState = {
+    ...helper.defaultState(),
+    status: 'running',
+    phase: 'watching-video',
+    currentClassId: 'class-1',
+    currentLessonTitle: '测试课程',
+    currentLessonKey: 'class-1::测试课程'
+};
+values.set('gdgbpx_workshop_helper_state_v1', emptyDetailPlayingState);
+helper.handleDetailPage(helper.getState());
+assert.equal(helper.getState().phase, 'watching-video',
+    'an empty Vue detail DOM during reload must preserve the active player phase');
 
 function runningState(phase) {
     return {

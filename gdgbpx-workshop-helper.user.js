@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.16
+// @version      1.5.17
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.16';
+    const VERSION = '1.5.17';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -1583,6 +1583,18 @@
                 hasRequiredPane: Boolean(document.querySelector('#pane-required')),
                 itemBoxes: document.querySelectorAll('#pane-required .item_box').length
             });
+            const activePlayerPhase = [
+                'opening-video', 'watching-video', 'closing-player',
+                'awaiting-detail-refresh', 'closing-completed-player'
+            ].includes(state.phase);
+            if (activePlayerPhase) {
+                debugLog('info', 'detail-loading-preserves-player-phase', {
+                    phase: state.phase,
+                    lesson: state.currentLessonTitle,
+                    reason: 'vue-course-list-not-rendered-yet'
+                });
+                return;
+            }
             updateState({ phase: 'detail-loading', message: '等待必修课程列表加载' });
             return;
         }
