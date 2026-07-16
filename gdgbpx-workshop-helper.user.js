@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.18
+// @version      1.5.19
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.18';
+    const VERSION = '1.5.19';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -67,6 +67,11 @@
     const PLAYER_HEARTBEAT_INTERVAL_MS = 1500;
     const PLAYER_CLOSE_HEARTBEAT_SILENCE_MS = 10000;
     const PLAYER_CLOSE_MIN_CONFIRM_MS = 4000;
+    const ACTIVE_LESSON_PHASES = new Set([
+        'opening-video', 'watching-video', 'closing-player',
+        'checking-progress', 'refresh-delay', 'awaiting-detail-refresh',
+        'closing-completed-player'
+    ]);
 
     let mainTickTimer = null;
     let detailRefreshTimer = null;
@@ -566,6 +571,29 @@
         return value && !list.includes(value) ? [...list, value] : list;
     }
 
+    function hasActiveLessonContext(state = getState()) {
+        return state.status === 'running'
+            && ACTIVE_LESSON_PHASES.has(state.phase)
+            && Boolean(state.currentClassId)
+            && Boolean(state.currentLessonKey)
+            && Boolean(state.currentLessonTitle);
+    }
+
+    function restoreActiveDetailRoute(state) {
+        if (!hasActiveLessonContext(state) || !isAnyWorkshopListRoute()) return false;
+        const detailHash = `#/workshop/workshopindex/mergeClass?classId=${encodeURIComponent(state.currentClassId)}&type=1`;
+        debugLog('warn', 'list-route-preserves-active-player-context', {
+            phase: state.phase,
+            workshop: state.currentWorkshopTitle,
+            lesson: state.currentLessonTitle,
+            classId: state.currentClassId,
+            fromHash: sanitizedHash(),
+            toHash: detailHash
+        });
+        if (location.hash !== detailHash) location.hash = detailHash;
+        return true;
+    }
+
     function isListRoute() {
         if (!location.hash.includes('/workshop/workshopindex/classList')) return false;
         const query = location.hash.includes('?') ? location.hash.split('?')[1] : '';
@@ -1050,6 +1078,11 @@
     }
 
     function handleListPage(state) {
+        // A stale list navigation can arrive after the managed player has
+        // already started. Never let that old task erase the active lesson or
+        // click another workshop; restore the matching detail route instead.
+        if (restoreActiveDetailRoute(state)) return;
+
         const list = document.querySelector('.content-div .list_box');
         if (!list) {
             emptyStudyingListSeenAt = 0;
@@ -1588,10 +1621,7 @@
                 hasRequiredPane: Boolean(document.querySelector('#pane-required')),
                 itemBoxes: document.querySelectorAll('#pane-required .item_box').length
             });
-            const activePlayerPhase = [
-                'opening-video', 'watching-video', 'closing-player',
-                'awaiting-detail-refresh', 'closing-completed-player'
-            ].includes(state.phase);
+            const activePlayerPhase = hasActiveLessonContext(state);
             if (activePlayerPhase) {
                 debugLog('info', 'detail-loading-preserves-player-phase', {
                     phase: state.phase,

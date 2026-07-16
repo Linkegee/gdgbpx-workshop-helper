@@ -14,6 +14,7 @@ source = source.replace(
         shouldRecoverPausedVideoImmediately,
         resolveCoursePlayerUrl,
         openLessonPlayer,
+        handleListPage,
         handleDetailPage,
         setFallbackPlayerTab(value) { fallbackPlayerTab = value; },
         getManagedPlayerCloseRequestedAt() { return managedPlayerCloseRequestedAt; },
@@ -134,6 +135,18 @@ values.set('gdgbpx_workshop_helper_state_v1', emptyDetailPlayingState);
 helper.handleDetailPage(helper.getState());
 assert.equal(helper.getState().phase, 'watching-video',
     'an empty Vue detail DOM during reload must preserve the active player phase');
+
+context.location.hash = '#/workshop/workshopindex/classList?classType=3';
+values.set('gdgbpx_workshop_helper_state_v1', emptyDetailPlayingState);
+helper.handleListPage(helper.getState());
+assert.equal(helper.getState().phase, 'watching-video',
+    'a stale list task must not overwrite an active player phase');
+assert.equal(helper.getState().currentLessonKey, emptyDetailPlayingState.currentLessonKey,
+    'a stale list task must preserve the active lesson identity');
+assert.equal(context.location.hash,
+    '#/workshop/workshopindex/mergeClass?classId=class-1&type=1',
+    'a stale list task must restore the matching detail route without opening another workshop');
+context.location.hash = '#/workshop/workshopindex/mergeClass?classId=class-1&type=1';
 
 let managedCloseCalls = 0;
 values.set('gdgbpx_workshop_helper_state_v1', {
