@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.15
+// @version      1.5.16
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.15';
+    const VERSION = '1.5.16';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -63,6 +63,7 @@
     const COMPLETED_CLOSE_GRACE_MS = 60000;
     const MAX_COMPLETED_CLOSE_RETRIES = 5;
     const PLAYER_REOPEN_COOLDOWN_MS = 3000;
+    const PLAYER_OPEN_START_TIMEOUT_MS = 45000;
     const PLAYER_HEARTBEAT_INTERVAL_MS = 1500;
     const PLAYER_CLOSE_HEARTBEAT_SILENCE_MS = 10000;
     const PLAYER_CLOSE_MIN_CONFIRM_MS = 4000;
@@ -1498,7 +1499,7 @@
         }
     }
 
-    function openPlayerFallbackTab(title) {
+    function openPlayerFallbackTab(title, trigger = 'fallback') {
         try {
             if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
                 debugLog('info', 'player-open-fallback-already-exists');
@@ -1515,10 +1516,12 @@
                 setParent: true
             });
             fallbackPlayerTab = tab || null;
-            debugLog('warn', 'player-open-fallback-tab', {
+            debugLog(trigger === 'primary' ? 'info' : 'warn',
+                trigger === 'primary' ? 'player-open-managed-tab' : 'player-open-fallback-tab', {
                 playDomain: target.playDomain,
                 resourceCode: target.resourceCode,
                 databaseCourseId: target.databaseCourseId,
+                trigger,
                 hasCourseContext: true,
                 hasCloseHandle: Boolean(tab && typeof tab.close === 'function')
             });
@@ -1527,6 +1530,29 @@
             debugLog('error', 'player-open-fallback-failed', { error });
             return false;
         }
+    }
+
+    function openLessonPlayer(lesson) {
+        if (!lesson?.title) return 'none';
+        // GM_openInTab is not subject to the site's intermittent window.open
+        // failure. The URL is reconstructed from the same Vue course context
+        // used by jump(resourceCode, courseId), so use this as the primary path.
+        if (openPlayerFallbackTab(lesson.title, 'primary')) {
+            debugLog('info', 'lesson-open-managed-tab', {
+                title: lesson.title,
+                index: lesson.index
+            });
+            return 'managed-tab';
+        }
+        if (!lesson.titleElement) return 'none';
+        debugLog('warn', 'lesson-open-site-click-fallback', {
+            title: lesson.title,
+            index: lesson.index,
+            reason: 'managed-player-url-unavailable'
+        });
+        lesson.titleElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setTimeout(() => lesson.titleElement.click(), 350);
+        return 'site-click';
     }
 
     function openCurrentLessonFromUserGesture() {
@@ -1758,10 +1784,10 @@
                 });
                 return;
             }
-            if (state.phase === 'opening-video' && age > 30000) {
+            if (state.phase === 'opening-video' && age > PLAYER_OPEN_START_TIMEOUT_MS) {
                 const attempts = Number(state.openAttempts || 0) + 1;
-                if (attempts >= 3) {
-                    if (!state.fallbackOpenAttempted && openPlayerFallbackTab(state.currentLessonTitle)) {
+                if (!state.fallbackOpenAttempted) {
+                    if (openPlayerFallbackTab(state.currentLessonTitle, 'fallback')) {
                         updateState({
                             phase: 'opening-video',
                             openAttempts: attempts,
@@ -1788,10 +1814,16 @@
                     }
                 } else {
                     updateState({
-                        phase: 'detail-ready',
+                        status: 'paused',
+                        phase: 'player-open-failed',
                         openAttempts: attempts,
-                        message: `未检测到播放器启动，准备第 ${attempts + 1} 次尝试`,
-                        lastActionAt: 0
+                        message: '已直接打开课程播放器，但 45 秒内仍未收到启动信号；请检查播放器标签页后点“继续”'
+                    });
+                    debugLog('warn', 'managed-player-open-timeout', {
+                        lesson: state.currentLessonTitle,
+                        attempts,
+                        waitedMs: age,
+                        fallbackOpenAttempted: true
                     });
                 }
             }
@@ -1905,8 +1937,24 @@
             serverCompletedLessonKeys,
             skippedLessonKeys: state.skippedLessonKeys
         });
-        nextLesson.titleElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        setTimeout(() => nextLesson.titleElement.click(), 350);
+        const openMethod = openLessonPlayer(nextLesson);
+        if (openMethod === 'managed-tab') {
+            updateState({
+                fallbackOpenAttempted: true,
+                lastActionAt: Date.now(),
+                message: `已打开必修 ${nextLesson.index + 1}/${lessons.length}，等待播放器开始`
+            });
+        } else if (openMethod === 'none') {
+            updateState({
+                status: 'paused',
+                phase: 'player-open-failed',
+                message: '无法读取当前课程的播放器地址或点击入口；请点“重新检查”后继续'
+            });
+            debugLog('error', 'lesson-open-no-available-path', {
+                title: nextLesson.title,
+                index: nextLesson.index
+            });
+        }
     }
 
     function returnToStudyingList() {

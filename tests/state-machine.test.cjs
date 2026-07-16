@@ -13,6 +13,7 @@ source = source.replace(
         handlePlayerEvent,
         shouldRecoverPausedVideoImmediately,
         resolveCoursePlayerUrl,
+        openLessonPlayer,
         setDetailRefreshTimer(value) { detailRefreshTimer = value; },
         getDetailRefreshTimer() { return detailRefreshTimer; }
     };
@@ -22,6 +23,7 @@ source = source.replace(
 );
 
 const values = new Map();
+const openedTabs = [];
 const documentStub = {
     readyState: 'complete',
     title: '',
@@ -58,7 +60,11 @@ const context = {
     GM_registerMenuCommand() {},
     GM_setClipboard() {},
     GM_xmlhttpRequest() {},
-    GM_openInTab() {}
+    GM_openInTab(url, options) {
+        const handle = { close() {} };
+        openedTabs.push({ url, options, handle });
+        return handle;
+    }
 };
 const courseTitle = '课程甲';
 const courseComponent = {
@@ -101,6 +107,16 @@ assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseId'), 'player-r
     'the player query parameter must use resourceCode, matching jump(resourceCode, courseId)');
 assert.equal(new URL(resolvedPlayer.url).searchParams.get('t'), 'secret-token');
 assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseLabel'), 'wlxy');
+
+const primaryOpenMethod = helper.openLessonPlayer({
+    title: courseTitle,
+    index: 0,
+    titleElement: courseTitleNode
+});
+assert.equal(primaryOpenMethod, 'managed-tab', 'the managed extension tab must be the primary open path');
+assert.equal(openedTabs.length, 1);
+assert.equal(new URL(openedTabs[0].url).searchParams.get('courseId'), 'player-resource-456');
+assert.equal(openedTabs[0].options.active, true);
 
 function runningState(phase) {
     return {
