@@ -11,6 +11,7 @@ source = source.replace(
         getState,
         updateState,
         handlePlayerEvent,
+        shouldRecoverPausedVideoImmediately,
         setDetailRefreshTimer(value) { detailRefreshTimer = value; },
         getDetailRefreshTimer() { return detailRefreshTimer; }
     };
@@ -111,5 +112,27 @@ assert.equal(helper.getDetailRefreshTimer(), null, 'playback must cancel an old 
 
 assert.match(source, /if \(!\['checking-progress', 'refresh-delay'\]\.includes\(latest\.phase\)\)/,
     'completion recheck callback must verify that its phase is still current');
+
+const resumableVideo = { ended: false };
+assert.equal(helper.shouldRecoverPausedVideoImmediately(
+    resumableVideo,
+    runningState('watching-video'),
+    false
+), true, 'a transient site pause must be recoverable immediately while running');
+assert.equal(helper.shouldRecoverPausedVideoImmediately(
+    resumableVideo,
+    { ...runningState('watching-video'), status: 'paused' },
+    false
+), false, 'the helper pause button must suppress immediate recovery');
+assert.equal(helper.shouldRecoverPausedVideoImmediately(
+    resumableVideo,
+    runningState('watching-video'),
+    true
+), false, 'a visible course question must suppress immediate recovery');
+assert.equal(helper.shouldRecoverPausedVideoImmediately(
+    resumableVideo,
+    { ...runningState('closing-completed-player'), completedCloseRequestAt: Date.now() },
+    false
+), false, 'a server-confirmed close request must suppress immediate recovery');
 
 console.log('state-machine regression tests passed');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.12
+// @version      1.5.13
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.12';
+    const VERSION = '1.5.13';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -47,6 +47,7 @@
     const HIGH_FREQUENCY_LOG_INTERVAL_MS = 5000;
     const HIGH_FREQUENCY_LOG_EVENTS = new Set([
         'video-paused', 'video-playing', 'video-native-stalled',
+        'video-pause-immediate-recovery', 'video-pause-recovery-succeeded',
         'video-started', 'player-start-attempt', 'player-event-received', 'publish-event'
     ]);
     const DEBUG_BRIDGE_URL = 'http://127.0.0.1:17891/ingest';
@@ -2312,6 +2313,7 @@
                 ended: video.ended,
                 readyState: video.readyState
             });
+            recoverPausedVideoImmediately(video);
         });
         video.addEventListener('waiting', () => {
             debugLog('warn', 'video-waiting', {
@@ -2380,6 +2382,42 @@
             attemptPlayerStart(video);
         });
         applyPlayerState(getState());
+    }
+
+    function shouldRecoverPausedVideoImmediately(video, state, blockingQuestion = false) {
+        return Boolean(video
+            && state?.status === 'running'
+            && state?.settings?.autoResume
+            && !video.ended
+            && !blockingQuestion
+            && !state.stopRequestAt
+            && !state.skipRequestAt
+            && !state.completedCloseRequestAt
+            && state.phase !== 'closing-completed-player');
+    }
+
+    function recoverPausedVideoImmediately(video) {
+        const state = getState();
+        if (!shouldRecoverPausedVideoImmediately(video, state, hasBlockingQuestion())) return false;
+
+        debugLog('info', 'video-pause-immediate-recovery', {
+            currentTime: Number(video.currentTime || 0),
+            readyState: video.readyState,
+            networkState: video.networkState,
+            phase: state.phase
+        });
+        applyPlayerState(state);
+        video.play().then(() => {
+            debugLog('info', 'video-pause-recovery-succeeded', {
+                currentTime: Number(video.currentTime || 0)
+            });
+        }).catch((error) => {
+            debugLog('warn', 'video-pause-recovery-rejected', {
+                currentTime: Number(video.currentTime || 0),
+                error
+            });
+        });
+        return true;
     }
 
     function attemptPlayerStart(video) {
