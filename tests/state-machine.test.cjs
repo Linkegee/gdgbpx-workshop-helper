@@ -12,6 +12,7 @@ source = source.replace(
         updateState,
         handlePlayerEvent,
         shouldRecoverPausedVideoImmediately,
+        resolveCoursePlayerUrl,
         setDetailRefreshTimer(value) { detailRefreshTimer = value; },
         getDetailRefreshTimer() { return detailRefreshTimer; }
     };
@@ -59,6 +60,27 @@ const context = {
     GM_xmlhttpRequest() {},
     GM_openInTab() {}
 };
+const courseTitle = '课程甲';
+const courseComponent = {
+    info: { playDomain: 'https://player.example/playverif_pc.html' },
+    $$Request: { course_auth: 'secret-token' },
+    listNav: {
+        requiredCourseList: {
+            listInfo: [{ courseId: 'course-123', courseName: courseTitle }]
+        }
+    },
+    $parent: null
+};
+const courseTitleNode = {
+    textContent: courseTitle,
+    __vue__: null,
+    parentElement: { __vue__: courseComponent, parentElement: null }
+};
+context.unsafeWindow = {
+    document: {
+        querySelectorAll(selector) { return selector === '.item_title' ? [courseTitleNode] : []; }
+    }
+};
 context.window = context;
 context.window.top = context.window;
 context.globalThis = context;
@@ -66,6 +88,13 @@ context.globalThis = context;
 vm.runInNewContext(source, context, { filename: scriptPath });
 const helper = context.__helperTest;
 assert.ok(helper, 'test hooks should be installed');
+
+const resolvedPlayer = helper.resolveCoursePlayerUrl(courseTitle);
+assert.equal(resolvedPlayer.courseId, 'course-123');
+assert.equal(resolvedPlayer.playDomain, 'https://player.example/playverif_pc.html');
+assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseId'), 'course-123');
+assert.equal(new URL(resolvedPlayer.url).searchParams.get('t'), 'secret-token');
+assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseLabel'), 'wlxy');
 
 function runningState(phase) {
     return {

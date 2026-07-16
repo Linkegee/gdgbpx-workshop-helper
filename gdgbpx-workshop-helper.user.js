@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.13
+// @version      1.5.14
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -20,6 +20,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
+// @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      raw.githubusercontent.com
 // @run-at       document-idle
@@ -28,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.13';
+    const VERSION = '1.5.14';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -105,6 +106,9 @@
     let lastPlayerHeartbeatWriteAt = 0;
     let emptyStudyingListSeenAt = 0;
     let playerRecoverySeekApplied = false;
+    let playerIdentityVerified = false;
+    let playerIdentityMismatchClosing = false;
+    let playerStartedEventPublished = false;
 
     function defaultState() {
         return {
@@ -224,6 +228,16 @@
     }
 
     function publishEvent(type, detail = {}) {
+        if (PLAYER_HOSTS.has(location.hostname)
+            && ['video-started', 'video-progress', 'video-ended', 'video-stalled', 'video-stall-warning'].includes(type)
+            && !playerIdentityVerified) {
+            debugLog('warn', 'player-event-suppressed-unverified-identity', {
+                type,
+                lessonKey: playerLessonKey,
+                lessonTitle: playerLessonTitle
+            });
+            return null;
+        }
         const event = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
             type,
@@ -235,6 +249,7 @@
         };
         debugLog('info', 'publish-event', { type, detail });
         GM_setValue(EVENT_KEY, event);
+        return event;
     }
 
     function contextName() {
@@ -245,7 +260,7 @@
 
     function sanitizedUrl() {
         return location.href
-            .replace(/([?&#](?:token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
+            .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
             .slice(0, 500);
     }
 
@@ -327,7 +342,7 @@
         if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
         if (typeof value === 'string') {
             const scrubbed = value
-                .replace(/([?&#](?:token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
+                .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
                 .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
                 .replace(/(cookie\s*[:=]\s*)[^\r\n,}]+/gi, '$1[redacted]');
             return scrubbed.length > 1000 ? `${scrubbed.slice(0, 1000)}…` : scrubbed;
@@ -1431,22 +1446,69 @@
         return `${classId || 'unknown'}::${title}`;
     }
 
-    const PLAYER_FALLBACK_URL = 'https://wcs1.shawcoder.xyz/gdcecw/play_pc/playdo_pc.html';
+    function resolveCoursePlayerUrl(title) {
+        try {
+            const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const pageDocument = pageWindow.document || document;
+            const normalizedTitle = normalizeText(title);
+            const titleElement = [...pageDocument.querySelectorAll('.item_title')]
+                .find((node) => normalizeText(node.textContent) === normalizedTitle);
+            let componentNode = titleElement;
+            while (componentNode && !componentNode.__vue__) componentNode = componentNode.parentElement;
+            let component = componentNode?.__vue__ || null;
+            while (component && !component.info?.playDomain) component = component.$parent;
+            const lists = [
+                component?.listNav?.requiredCourseList?.listInfo,
+                component?.listNav?.optionalCourseList?.listInfo,
+                component?.info?.requiredCourseList,
+                component?.info?.optionalCourseList
+            ].filter(Array.isArray);
+            const course = lists.flat().find((item) => normalizeText(item?.courseName) === normalizedTitle);
+            const token = component?.$$Request?.course_auth;
+            const playDomain = component?.info?.playDomain;
+            if (!course?.courseId || !token || !playDomain) {
+                debugLog('warn', 'course-player-url-context-missing', {
+                    lesson: title,
+                    hasTitleElement: Boolean(titleElement),
+                    hasComponent: Boolean(component),
+                    hasCourseId: Boolean(course?.courseId),
+                    hasToken: Boolean(token),
+                    hasPlayDomain: Boolean(playDomain)
+                });
+                return null;
+            }
+            const url = new URL(playDomain);
+            url.searchParams.set('t', token);
+            url.searchParams.set('courseId', course.courseId);
+            url.searchParams.set('courseLabel', 'wlxy');
+            return { url: url.href, courseId: course.courseId, playDomain: url.origin + url.pathname };
+        } catch (error) {
+            debugLog('error', 'course-player-url-resolution-failed', { lesson: title, error });
+            return null;
+        }
+    }
 
-    function openPlayerFallbackTab() {
+    function openPlayerFallbackTab(title) {
         try {
             if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
                 debugLog('info', 'player-open-fallback-already-exists');
                 return true;
             }
-            const tab = GM_openInTab(PLAYER_FALLBACK_URL, {
+            const target = resolveCoursePlayerUrl(title);
+            if (!target) {
+                debugLog('warn', 'player-open-fallback-blocked-without-course-context', { lesson: title });
+                return false;
+            }
+            const tab = GM_openInTab(target.url, {
                 active: true,
                 insert: true,
                 setParent: true
             });
             fallbackPlayerTab = tab || null;
             debugLog('warn', 'player-open-fallback-tab', {
-                url: PLAYER_FALLBACK_URL,
+                playDomain: target.playDomain,
+                courseId: target.courseId,
+                hasCourseContext: true,
                 hasCloseHandle: Boolean(tab && typeof tab.close === 'function')
             });
             return true;
@@ -1688,7 +1750,7 @@
             if (state.phase === 'opening-video' && age > 30000) {
                 const attempts = Number(state.openAttempts || 0) + 1;
                 if (attempts >= 3) {
-                    if (!state.fallbackOpenAttempted && openPlayerFallbackTab()) {
+                    if (!state.fallbackOpenAttempted && openPlayerFallbackTab(state.currentLessonTitle)) {
                         updateState({
                             phase: 'opening-video',
                             openAttempts: attempts,
@@ -2085,9 +2147,15 @@
             storePlayerIdentity(storedIdentity);
         }
         const detectedTitle = detectVisiblePlayerLessonTitle(state);
-        if (!detectedTitle || !state.currentClassId) return;
+        if (!detectedTitle || !state.currentClassId) return false;
         const detectedKey = lessonKey(state.currentClassId, detectedTitle);
-        if (detectedKey === playerLessonKey) return;
+        const expectedKey = state.currentLessonKey || '';
+        const identityMatches = !expectedKey || detectedKey === expectedKey;
+        playerIdentityVerified = identityMatches;
+        if (detectedKey === playerLessonKey) {
+            if (!identityMatches) closeMismatchedPlayer(state, detectedKey, detectedTitle);
+            return identityMatches;
+        }
         const previous = {
             sessionId: playerSessionId,
             lessonKey: playerLessonKey,
@@ -2105,6 +2173,36 @@
             next,
             documentTitle: document.title
         });
+        if (!identityMatches) closeMismatchedPlayer(state, detectedKey, detectedTitle);
+        return identityMatches;
+    }
+
+    function closeMismatchedPlayer(state, detectedKey, detectedTitle) {
+        if (playerIdentityMismatchClosing || state.status !== 'running'
+            || !['opening-video', 'watching-video'].includes(state.phase)) return;
+        playerIdentityMismatchClosing = true;
+        debugLog('error', 'player-identity-mismatch-closing', {
+            expectedLessonKey: state.currentLessonKey,
+            expectedLessonTitle: state.currentLessonTitle,
+            detectedLessonKey: detectedKey,
+            detectedLessonTitle: detectedTitle,
+            phase: state.phase
+        });
+        publishEvent('player-identity-mismatch', {
+            expectedLessonKey: state.currentLessonKey,
+            expectedLessonTitle: state.currentLessonTitle,
+            detectedLessonKey: detectedKey,
+            detectedLessonTitle: detectedTitle
+        });
+        setTimeout(() => closePlayerWindow('player-identity-mismatch'), 0);
+    }
+
+    function maybePublishVerifiedVideoStarted(video) {
+        if (!video || playerStartedEventPublished || !playerIdentityVerified
+            || video.paused || video.ended) return false;
+        playerStartedEventPublished = true;
+        publishEvent('video-started', { rate: video.playbackRate, identityVerified: true });
+        return true;
     }
 
     function writePlayerHeartbeat(force = false) {
@@ -2223,7 +2321,8 @@
         const source = playerVideo.currentSrc || playerVideo.getAttribute('src') || '';
         if (source !== playerSource) {
             playerSource = source;
-            playerPlaybackStarted = false;
+            playerPlaybackStarted = !playerVideo.paused && !playerVideo.ended;
+            playerStartedEventPublished = false;
             lastPlayerTime = Number(playerVideo.currentTime || 0);
             lastPlayerProgressAt = Date.now();
             lastPlayAttemptAt = 0;
@@ -2235,6 +2334,9 @@
                 duration: Number(playerVideo.duration || 0)
             });
         }
+
+        if (!playerVideo.paused && !playerVideo.ended) playerPlaybackStarted = true;
+        maybePublishVerifiedVideoStarted(playerVideo);
 
         const current = Number(playerVideo.currentTime || 0);
         if (current > lastPlayerTime + 0.2) {
@@ -2298,9 +2400,13 @@
             playerPlaybackStarted = true;
             const state = getState();
             applyPlayerState(state);
-            publishEvent('video-started', { rate: video.playbackRate });
+            syncPlayerIdentityFromVisibleTitle(state);
+            maybePublishVerifiedVideoStarted(video);
         });
         video.addEventListener('playing', () => {
+            playerPlaybackStarted = true;
+            syncPlayerIdentityFromVisibleTitle(getState());
+            maybePublishVerifiedVideoStarted(video);
             debugLog('info', 'video-playing', {
                 currentTime: Number(video.currentTime || 0),
                 duration: Number(video.duration || 0),
