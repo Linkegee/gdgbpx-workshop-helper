@@ -66,7 +66,11 @@ const courseComponent = {
     $$Request: { course_auth: 'secret-token' },
     listNav: {
         requiredCourseList: {
-            listInfo: [{ courseId: 'course-123', courseName: courseTitle }]
+            listInfo: [{
+                courseId: 'database-course-123',
+                resourceCode: 'player-resource-456',
+                courseName: courseTitle
+            }]
         }
     },
     $parent: null
@@ -90,9 +94,11 @@ const helper = context.__helperTest;
 assert.ok(helper, 'test hooks should be installed');
 
 const resolvedPlayer = helper.resolveCoursePlayerUrl(courseTitle);
-assert.equal(resolvedPlayer.courseId, 'course-123');
+assert.equal(resolvedPlayer.resourceCode, 'player-resource-456');
+assert.equal(resolvedPlayer.databaseCourseId, 'database-course-123');
 assert.equal(resolvedPlayer.playDomain, 'https://player.example/playverif_pc.html');
-assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseId'), 'course-123');
+assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseId'), 'player-resource-456',
+    'the player query parameter must use resourceCode, matching jump(resourceCode, courseId)');
 assert.equal(new URL(resolvedPlayer.url).searchParams.get('t'), 'secret-token');
 assert.equal(new URL(resolvedPlayer.url).searchParams.get('courseLabel'), 'wlxy');
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.14
+// @version      1.5.15
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,7 +29,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.14';
+    const VERSION = '1.5.15';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -1466,12 +1466,17 @@
             const course = lists.flat().find((item) => normalizeText(item?.courseName) === normalizedTitle);
             const token = component?.$$Request?.course_auth;
             const playDomain = component?.info?.playDomain;
-            if (!course?.courseId || !token || !playDomain) {
+            // The workshop template calls jump(item.resourceCode, item.courseId).
+            // Despite the query-string name, playverif_pc.html expects the first
+            // argument (resourceCode) in its `courseId` parameter.  Supplying the
+            // database courseId opens a page that reports “没有找到播放资源”.
+            if (!course?.resourceCode || !token || !playDomain) {
                 debugLog('warn', 'course-player-url-context-missing', {
                     lesson: title,
                     hasTitleElement: Boolean(titleElement),
                     hasComponent: Boolean(component),
-                    hasCourseId: Boolean(course?.courseId),
+                    hasResourceCode: Boolean(course?.resourceCode),
+                    hasDatabaseCourseId: Boolean(course?.courseId),
                     hasToken: Boolean(token),
                     hasPlayDomain: Boolean(playDomain)
                 });
@@ -1479,9 +1484,14 @@
             }
             const url = new URL(playDomain);
             url.searchParams.set('t', token);
-            url.searchParams.set('courseId', course.courseId);
+            url.searchParams.set('courseId', course.resourceCode);
             url.searchParams.set('courseLabel', 'wlxy');
-            return { url: url.href, courseId: course.courseId, playDomain: url.origin + url.pathname };
+            return {
+                url: url.href,
+                resourceCode: course.resourceCode,
+                databaseCourseId: course.courseId || '',
+                playDomain: url.origin + url.pathname
+            };
         } catch (error) {
             debugLog('error', 'course-player-url-resolution-failed', { lesson: title, error });
             return null;
@@ -1507,7 +1517,8 @@
             fallbackPlayerTab = tab || null;
             debugLog('warn', 'player-open-fallback-tab', {
                 playDomain: target.playDomain,
-                courseId: target.courseId,
+                resourceCode: target.resourceCode,
+                databaseCourseId: target.databaseCourseId,
                 hasCourseContext: true,
                 hasCloseHandle: Boolean(tab && typeof tab.close === 'function')
             });
