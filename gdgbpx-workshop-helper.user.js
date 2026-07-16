@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.11
+// @version      1.5.12
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -28,7 +28,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.11';
+    const VERSION = '1.5.12';
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -1599,8 +1599,17 @@
                     status: currentLesson.status
                 });
                 detailRefreshTimer = setTimeout(() => {
+                    detailRefreshTimer = null;
                     const latest = getState();
                     if (latest.status !== 'running' || !isDetailRoute()) return;
+                    if (!['checking-progress', 'refresh-delay'].includes(latest.phase)) {
+                        debugLog('info', 'stale-detail-refresh-timer-ignored', {
+                            phase: latest.phase,
+                            lessonKey: latest.currentLessonKey,
+                            reason: 'player-resumed-before-completion-recheck'
+                        });
+                        return;
+                    }
                     updateState({ phase: 'checking-progress', message: '实时复查服务器“已完成”状态', lastActionAt: Date.now() });
                     reloadServerStatusFrame('retry-after-video-close');
                     scheduleMainTick();
@@ -1882,10 +1891,20 @@
                 debugLog('info', 'completion-close-ignores-video-start', { lessonKey: event.lessonKey });
                 return;
             }
+            if (detailRefreshTimer) {
+                clearTimeout(detailRefreshTimer);
+                detailRefreshTimer = null;
+                debugLog('info', 'detail-refresh-timer-cancelled-by-playback', {
+                    type: event.type,
+                    previousPhase: state.phase,
+                    lessonKey: event.lessonKey
+                });
+            }
             updateState({
                 phase: 'watching-video',
                 message: `播放器已开始（${event.rate || state.settings.playbackRate}×）`,
                 lastActionAt: Date.now(),
+                refreshAttempts: 0,
                 openAttempts: 0,
                 fallbackOpenAttempted: false
             });
@@ -1901,10 +1920,21 @@
                 });
                 return;
             }
+            if (detailRefreshTimer) {
+                clearTimeout(detailRefreshTimer);
+                detailRefreshTimer = null;
+                debugLog('info', 'detail-refresh-timer-cancelled-by-playback', {
+                    type: event.type,
+                    previousPhase: state.phase,
+                    lessonKey: event.lessonKey,
+                    currentTime: event.currentTime
+                });
+            }
             updateState({
                 phase: 'watching-video',
                 message: `播放中：${formatClock(event.currentTime)} / ${formatClock(event.duration)}，${event.rate || 1}×`,
-                lastActionAt: Date.now()
+                lastActionAt: Date.now(),
+                refreshAttempts: 0
             });
             return;
         }
@@ -1955,6 +1985,22 @@
             debugLog('info', 'completion-close-ignores-player-event', {
                 type: event.type,
                 lessonKey: event.lessonKey
+            });
+            return;
+        }
+
+        const bootstrapUnload = event.type === 'player-unloading'
+            && state.status === 'running'
+            && state.phase === 'opening-video'
+            && Number(event.currentTime || 0) === 0
+            && Number(event.duration || 0) === 0
+            && normalizeText(event.documentTitle).includes('验证中');
+        if (bootstrapUnload) {
+            debugLog('info', 'player-bootstrap-unload-ignored', {
+                documentTitle: event.documentTitle,
+                lessonKey: event.lessonKey,
+                playerSessionId: event.playerSessionId,
+                reason: 'verification-page-navigating-to-real-player'
             });
             return;
         }
