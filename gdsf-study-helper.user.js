@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.7
+// @version      0.1.8
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.7';
+    const VERSION = '0.1.8';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -357,10 +357,15 @@
             currentCourseTitle: next.item.title,
             message: `进入二级课程：${next.item.title}`
         });
-        // Keep each course in its own tab so closing it returns to the category/index tab.
-        // If a browser blocks the popup, navigation remains a safe fallback.
-        const child = window.open(next.item.href, '_blank');
-        if (!child) location.assign(next.item.href);
+        // Open every secondary course in an extension-managed tab. This avoids popup blocking
+        // and, crucially, never navigates the index tab away from the course list.
+        try {
+            GM_openInTab(next.item.href, { active: true, insert: true, setParent: true });
+            debugLog('info', 'course-tab-opened', { href: next.item.href, title: next.item.title });
+        } catch (error) {
+            debugLog('error', 'course-tab-open-failed', { error, href: next.item.href });
+            setState({ status: 'paused', message: '无法在新标签打开二级课程，请检查浏览器后继续。' });
+        }
     }
 
     function processChapterDirectory(state) {
@@ -374,8 +379,10 @@
                 message: `二级课程“${state.currentCourseTitle}”已完成，正在关闭课程标签页。`
             });
             setTimeout(() => {
-                if (window.opener) window.close();
-                else history.back();
+                // The tab was created with GM_openInTab; closing it must never navigate a
+                // non-popup page backwards, because that could discard the course homepage.
+                debugLog('info', 'course-tab-close-requested', { course: state.currentCourseTitle });
+                window.close();
             }, 500);
             return;
         }
