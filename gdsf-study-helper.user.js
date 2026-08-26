@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.22
+// @version      0.1.23
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.22';
+    const VERSION = '0.1.23';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -51,6 +51,7 @@
     let activeCourseTab = null;
     let homeStatusRefreshAt = 0;
     let homeStatusRefreshInFlight = false;
+	let submittedLearnForChapter = '';
 
     function defaultState() {
         return {
@@ -71,9 +72,15 @@
             strictVerificationVersion: 0,
             homeCourseStatusByHref: {},
             homeStatusFetchedAt: 0,
-            homeProgressPercent: null,
-            autoStopAt100: true,
-            skipPracticeBank: true,
+
+			homeProgressPercent: null,
+			autoStopAt100: true,
+
+			// normal = 正常模式
+			// fast = 极速模式
+			learningMode: 'normal',
+
+			skipPracticeBank: true,
             openedOuterAt: 0,
             updatedAt: Date.now()
         };
@@ -191,6 +198,7 @@
                 const remoteVersion = match?.[1] || '';
                 if (response.status >= 200 && response.status < 300 && remoteVersion && compareVersions(remoteVersion, VERSION) > 0) {
                     updateReady = true;
+
                     renderUpdate(`发现 v${remoteVersion}，点击“更新”安装。`, true);
                     debugLog('info', 'update-available', { installed: VERSION, remote: remoteVersion });
                 } else {
@@ -391,6 +399,7 @@
                     debugLog('info', 'home-progress-refreshed', { progress: progress.percent, progressWidgetUpdated });
                 }
             },
+
             onerror: (error) => {
                 homeStatusRefreshInFlight = false;
                 debugLog('warn', 'home-status-refresh-error', { error });
@@ -472,12 +481,42 @@
         });
         debugLog('info', 'home-progress-auto-stop-changed', { autoStopAt100 });
     }
+	function toggleLearningMode() {
+		const state = getState();
 
-    function reset() {
-        GM_deleteValue(STATE_KEY);
-        completionStartedAt = 0;
-        renderPanel(defaultState());
-    }
+		const learningMode =
+			state.learningMode === 'fast'
+				? 'normal'
+				: 'fast';
+
+		submittedLearnForChapter = '';
+
+		setState({
+			learningMode,
+			message:
+				learningMode === 'fast'
+					? '已切换为极速模式：章节滚动到底后执行 submitLearn()。'
+					: '已切换为正常模式：不会执行 submitLearn()。'
+		});
+
+		debugLog('info', 'learning-mode-changed', {
+			learningMode
+		});
+
+		// 如果当前已经在章节页面，立即触发一次
+		if (
+			getState().status === 'running' &&
+			isChapterPage()
+		) {
+			tick();
+		}
+	}
+	function reset() {
+		GM_deleteValue(STATE_KEY);
+		completionStartedAt = 0;
+		submittedLearnForChapter = '';
+		renderPanel(defaultState());
+	}
 
     function processIndex(state) {
         const categories = outerCourses();
@@ -561,6 +600,7 @@
         const next = selectNext(rows, 0, ({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
             const completedCourseHrefs = [...new Set([...(state.completedCourseHrefs || []), state.currentCourseHref].filter(Boolean))];
+
             setState({
                 phase: 'outer-selected',
                 courseIndex: state.courseIndex + 1,
@@ -580,14 +620,141 @@
         clickNode(next.item.node);
     }
 
+	function submitLearnAfterScroll() {
+		const chapterKey = location.href;
+
+		// 当前章节只执行一次
+		if (submittedLearnForChapter === chapterKey) {
+			return;
+		}
+
+		submittedLearnForChapter = chapterKey;
+
+		let checks = 0;
+		const maxChecks = 20;
+
+		const timer = setInterval(() => {
+			checks += 1;
+
+			const scrollTop =
+				window.scrollY ||
+				document.documentElement.scrollTop ||
+				document.body.scrollTop ||
+				0;
+
+			const viewportHeight =
+				window.innerHeight ||
+				document.documentElement.clientHeight ||
+				0;
+
+			const documentHeight =
+				Math.max(
+					document.body.scrollHeight,
+					document.documentElement.scrollHeight,
+					document.body.offsetHeight,
+					document.documentElement.offsetHeight
+				);
+
+			const reachedBottom =
+				scrollTop + viewportHeight >=
+				documentHeight - 20;
+
+			if (!reachedBottom && checks < maxChecks) {
+				return;
+			}
+
+			clearInterval(timer);
+
+			if (!reachedBottom) {
+				submittedLearnForChapter = '';
+
+				debugLog(
+					'warn',
+					'fast-mode-bottom-timeout'
+				);
+
+				return;
+			}
+
+			setTimeout(() => {
+				try {
+					const script =
+						document.createElement('script');
+
+					script.textContent = `
+						(() => {
+							try {
+								console.log(
+									'[学法学习助手] 极速模式：准备执行 submitLearn()'
+								);
+
+								if (typeof submitLearn === 'function') {
+									submitLearn();
+
+									console.log(
+										'[学法学习助手] 极速模式：submitLearn() 已执行'
+									);
+								} else {
+									console.warn(
+										'[学法学习助手] 极速模式：页面中未找到 submitLearn()'
+									);
+								}
+							} catch (error) {
+								console.error(
+									'[学法学习助手] 极速模式：submitLearn() 执行失败',
+									error
+								);
+							}
+						})();
+					`;
+
+					(
+						document.head ||
+						document.documentElement
+					).appendChild(script);
+
+					script.remove();
+
+					debugLog(
+						'info',
+						'fast-mode-submit-injected',
+						{
+							chapter:
+								getState().currentChapterTitle
+						}
+					);
+				} catch (error) {
+					submittedLearnForChapter = '';
+
+					debugLog(
+						'error',
+						'fast-mode-submit-injection-failed',
+						{ error }
+					);
+				}
+			}, 300);
+		}, 300);
+	}
+
     function processChapter(state) {
         const score = document.querySelector(CHAPTER_SCORE_SELECTOR);
         if (!score) {
             setState({ status: 'paused', message: '未找到章节学分标记，请检查页面后再继续。' });
             return;
         }
-        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
-        const complete = score.classList.contains('chapter-score-suc');
+
+		window.scrollTo({
+    top: document.documentElement.scrollHeight,
+    behavior: 'smooth'
+});
+
+// 只有极速模式执行
+if (state.learningMode === 'fast') {
+    submitLearnAfterScroll();
+}
+
+const complete =
+    score.classList.contains('chapter-score-suc');
         const scoreSnapshot = `${score.className}|${cleanText(score.textContent)}`;
         if (scoreSnapshot !== lastScoreSnapshot) {
             lastScoreSnapshot = scoreSnapshot;
@@ -634,6 +801,7 @@
             else if (state.phase === 'outer-selected') processCourse(state);
             // Parent index tabs intentionally wait while their child course tab is active.
             return;
+
         }
         if (isCoursePage()) {
             if (state.phase === 'chapter-directory') processChapterDirectory(state);
@@ -657,7 +825,31 @@
     function renderPanel(state) {
         if (!panel) return;
         panel.querySelector('[data-role="status"]').textContent = `状态：${state.status} / ${state.phase}`;
-        panel.querySelector('[data-role="message"]').textContent = state.message;
+        const modeNode =
+    panel.querySelector('[data-role="mode"]');
+
+if (modeNode) {
+    modeNode.textContent =
+        state.learningMode === 'fast'
+            ? '模式：极速模式'
+            : '模式：正常模式';
+}
+
+const modeButton =
+    panel.querySelector('[data-action="learning-mode"]');
+
+if (modeButton) {
+    if (state.learningMode === 'fast') {
+        modeButton.textContent = '切换正常模式';
+        modeButton.style.background = '#ff9f1a';
+        modeButton.style.color = '#fff';
+    } else {
+        modeButton.textContent = '切换极速模式';
+        modeButton.style.background = '';
+        modeButton.style.color = '';
+    }
+}
+		panel.querySelector('[data-role="message"]').textContent = state.message;
         panel.querySelector('[data-role="current"]').textContent = [state.currentOuterTitle, state.currentCourseTitle, state.currentChapterTitle].filter(Boolean).join(' › ') || '尚未选择课程';
         panel.querySelector('[data-action="start"]').disabled = !isStudyIndex() || state.status === 'running';
         panel.querySelector('[data-action="resume"]').disabled = state.status === 'running' || state.status === 'complete';
@@ -704,8 +896,21 @@
             <button class="collapse-toggle" data-action="collapse" title="收起面板" aria-label="收起面板">−</button>
             <div class="panel-main">
                 <h2>学习助手 <span class="muted">v${VERSION}</span></h2>
-                <p data-role="status"></p>
-                <p data-role="message"></p>
+
+				<p data-role="status"></p>
+
+				<p
+					data-role="mode"
+					style="
+						margin:5px 0;
+						padding:5px 7px;
+						border-radius:5px;
+						background:rgba(255,255,255,.1);
+						font-weight:600;
+					"
+				></p>
+
+				<p data-role="message"></p>
                 <p class="muted" data-role="current"></p>
                 <p class="muted" data-role="update" hidden></p>
                 <div class="actions">
@@ -713,8 +918,16 @@
                     <button data-action="resume">继续</button>
                     <button data-action="pause">暂停</button>
                     <button class="danger" data-action="stop">停止</button>
-                    <button data-action="reset">重置</button>
-                    <button data-action="auto-stop-100">100%自动停：开</button>
+
+					<button data-action="reset">重置</button>
+
+					<button data-action="learning-mode">
+						切换极速模式
+					</button>
+
+					<button data-action="auto-stop-100">
+						100%自动停：开
+					</button>
                     <button data-action="logs">日志</button>
                     <button data-action="check-update">检查更新</button>
                     <button data-action="update" hidden>更新</button>
@@ -736,8 +949,16 @@
             if (action === 'resume') resume();
             if (action === 'pause') pause();
             if (action === 'stop') stop();
-            if (action === 'reset') reset();
-            if (action === 'auto-stop-100') toggleAutoStopAt100();
+
+			if (action === 'reset') reset();
+
+			if (action === 'learning-mode') {
+				toggleLearningMode();
+			}
+
+			if (action === 'auto-stop-100') {
+				toggleAutoStopAt100();
+			}
             if (action === 'check-update') checkForUpdate();
             if (action === 'update') installAvailableUpdate();
             if (action === 'logs') {
@@ -763,7 +984,6 @@
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
-
 
 
 
