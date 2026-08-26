@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.18
+// @version      0.1.19
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.18';
+    const VERSION = '0.1.19';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -296,9 +296,11 @@
                 node,
                 href,
                 title: heading || (linkText !== '进入学习' ? linkText : cardText),
-                // Homepage percentages can be stale. Completion is only trusted
-                // after this script verifies every chapter in the course directory.
-                completed: false
+                // The platform's explicit 100% marker is authoritative. Prefer
+                // the freshly synchronized snapshot, while also accepting the
+                // visible card after a normal category switch.
+                completed: /已完成\s*100%/.test(cardText)
+                    || Boolean(getState().homeCourseStatusByHref?.[href]?.completed)
             };
         });
     }
@@ -395,14 +397,16 @@
     }
 
     function chapterRows() {
-        // Each readable chapter has a direct /chapter/ link. Its enclosing table gains “获得X学分” on completion.
+        // Each readable chapter has a direct /chapter/ link. Its sub_title cell
+        // changes to “获得X学分” only after the platform awards the credit.
         return [...document.querySelectorAll('a[href*="/chapter/"]')]
             .filter(isVisible)
             .map((node) => {
                 const title = cleanText(node.textContent);
                 const container = node.closest('table') || node.parentElement;
                 const text = cleanText(container?.textContent);
-                return { node, container, title, completed: /获得\s*\d+(?:\.\d+)?\s*学分/.test(text) };
+                const creditText = cleanText(container?.querySelector('td.sub_title')?.textContent || text);
+                return { node, container, title, completed: /获得\s*\d+(?:\.\d+)?\s*学分/.test(creditText) };
             });
     }
 
@@ -499,7 +503,11 @@
             return;
         }
         const verifiedCourses = new Set(state.completedCourseHrefs || []);
-        const next = selectNext(links, 0, ({ href, title }) => !verifiedCourses.has(href) && !(state.skipPracticeBank && isPracticeBank(title)));
+        const next = selectNext(links, 0, ({ href, title, completed }) => !completed && !verifiedCourses.has(href) && !(state.skipPracticeBank && isPracticeBank(title)));
+        const platformCompleted = links.filter(({ completed }) => completed).map(({ href }) => href);
+        if (platformCompleted.length) {
+            debugLog('info', 'platform-completed-courses-skipped', { count: platformCompleted.length, hrefs: platformCompleted });
+        }
         if (!next) {
             setState({
                 phase: 'outer',
