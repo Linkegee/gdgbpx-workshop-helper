@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.19
+// @version      0.1.22
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.19';
+    const VERSION = '0.1.22';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -72,6 +72,7 @@
             homeCourseStatusByHref: {},
             homeStatusFetchedAt: 0,
             homeProgressPercent: null,
+            autoStopAt100: true,
             skipPracticeBank: true,
             openedOuterAt: 0,
             updatedAt: Date.now()
@@ -371,7 +372,7 @@
                 const state = getState();
                 const progress = readHomeProgress(remoteDocument);
                 const progressWidgetUpdated = syncHomeProgress(progress);
-                if (progress.percent !== null && progress.percent >= 100 && state.status === 'running') {
+                if (progress.percent !== null && progress.percent >= 100 && state.autoStopAt100 !== false && state.status === 'running') {
                     setState({
                         status: 'complete',
                         phase: 'idle',
@@ -458,6 +459,18 @@
 
     function stop() {
         setState({ status: 'stopped', phase: 'idle', message: '已停止。' });
+    }
+
+    function toggleAutoStopAt100() {
+        const state = getState();
+        const autoStopAt100 = state.autoStopAt100 === false;
+        setState({
+            autoStopAt100,
+            message: autoStopAt100
+                ? '主页进度达到 100% 时将自动停止。'
+                : '主页进度达到 100% 时不会自动停止。'
+        });
+        debugLog('info', 'home-progress-auto-stop-changed', { autoStopAt100 });
     }
 
     function reset() {
@@ -648,6 +661,12 @@
         panel.querySelector('[data-role="current"]').textContent = [state.currentOuterTitle, state.currentCourseTitle, state.currentChapterTitle].filter(Boolean).join(' › ') || '尚未选择课程';
         panel.querySelector('[data-action="start"]').disabled = !isStudyIndex() || state.status === 'running';
         panel.querySelector('[data-action="resume"]').disabled = state.status === 'running' || state.status === 'complete';
+        const autoStopButton = panel.querySelector('[data-action="auto-stop-100"]');
+        if (autoStopButton) {
+            const enabled = state.autoStopAt100 !== false;
+            autoStopButton.textContent = enabled ? '100%自动停：开' : '100%自动停：关';
+            autoStopButton.title = enabled ? '点击后：达到 100% 不自动停止' : '点击后：达到 100% 自动停止';
+        }
         renderLog();
     }
 
@@ -695,6 +714,7 @@
                     <button data-action="pause">暂停</button>
                     <button class="danger" data-action="stop">停止</button>
                     <button data-action="reset">重置</button>
+                    <button data-action="auto-stop-100">100%自动停：开</button>
                     <button data-action="logs">日志</button>
                     <button data-action="check-update">检查更新</button>
                     <button data-action="update" hidden>更新</button>
@@ -717,6 +737,7 @@
             if (action === 'pause') pause();
             if (action === 'stop') stop();
             if (action === 'reset') reset();
+            if (action === 'auto-stop-100') toggleAutoStopAt100();
             if (action === 'check-update') checkForUpdate();
             if (action === 'update') installAvailableUpdate();
             if (action === 'logs') {
@@ -742,5 +763,8 @@
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
+
+
+
 
 
