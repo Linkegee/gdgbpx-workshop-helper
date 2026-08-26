@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.9
+// @version      0.1.10
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -15,7 +15,6 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
-// @grant        GM_closeTab
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @run-at       document-idle
@@ -24,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.9';
+    const VERSION = '0.1.10';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -43,6 +42,7 @@
     let completionStartedAt = 0;
     let lastScoreSnapshot = '';
     let updateReady = false;
+    let activeCourseTab = null;
 
     function defaultState() {
         return {
@@ -180,20 +180,15 @@
         GM_openInTab(UPDATE_URL, { active: true, insert: true, setParent: true });
     }
 
-    function closeCurrentCourseTab(courseTitle) {
-        debugLog('info', 'course-tab-close-requested', { course: courseTitle });
+    function closeActiveCourseTab() {
+        const tab = activeCourseTab;
+        activeCourseTab = null;
+        if (!tab) return;
         try {
-            if (typeof GM_closeTab === 'function') {
-                GM_closeTab();
-                return;
-            }
+            tab.close();
+            debugLog('info', 'course-tab-closed-by-parent');
         } catch (error) {
-            debugLog('warn', 'gm-course-tab-close-failed', { error, course: courseTitle });
-        }
-        try {
-            window.close();
-        } catch (error) {
-            debugLog('warn', 'window-course-tab-close-failed', { error, course: courseTitle });
+            debugLog('warn', 'parent-course-tab-close-failed', { error });
         }
     }
 
@@ -356,6 +351,9 @@
     }
 
     function processCourse(state) {
+        // Runs only on the index tab. A completed child is closed here through
+        // the exact GM_openInTab handle before the next secondary course opens.
+        closeActiveCourseTab();
         const links = courseLinks(state.currentOuterKey);
         const next = selectNext(links, state.courseIndex, ({ title }) => !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
@@ -378,7 +376,7 @@
         // Open every secondary course in an extension-managed tab. This avoids popup blocking
         // and, crucially, never navigates the index tab away from the course list.
         try {
-            GM_openInTab(next.item.href, { active: true, insert: true, setParent: true });
+            activeCourseTab = GM_openInTab(next.item.href, { active: true, insert: true, setParent: true });
             debugLog('info', 'course-tab-opened', { href: next.item.href, title: next.item.title });
         } catch (error) {
             debugLog('error', 'course-tab-open-failed', { error, href: next.item.href });
@@ -396,10 +394,6 @@
                 chapterIndex: 0,
                 message: `二级课程“${state.currentCourseTitle}”已完成，正在关闭课程标签页。`
             });
-            setTimeout(() => {
-                // Never navigate backwards here: the parent index tab must stay intact.
-                closeCurrentCourseTab(state.currentCourseTitle);
-            }, 500);
             return;
         }
         setState({
