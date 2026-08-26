@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.11
+// @version      0.1.12
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.11';
+    const VERSION = '0.1.12';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -31,7 +31,9 @@
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
     const COMPLETION_TIMEOUT_MS = 90 * 60 * 1000;
     const OUTER_COURSE_SELECTOR = 'li[cl]';
-    const COURSE_LINK_SELECTOR = 'a.btn[href^="/study/course/"]';
+    // Some categories expose the course title itself as the link, while others
+    // use a separate “进入学习” button. Both forms must be discovered.
+    const COURSE_LINK_SELECTOR = 'a[href^="/study/course/"]';
     const CHAPTER_SCORE_SELECTOR = '.chapter-score';
     const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdsf-study-helper.user.js';
     const UPDATE_CHECK_URL = 'https://api.github.com/repos/Linkegee/gdgbpx-workshop-helper/contents/gdsf-study-helper.user.js';
@@ -57,7 +59,9 @@
             currentOuterTitle: '',
             currentOuterKey: '',
             currentCourseTitle: '',
+            currentCourseHref: '',
             currentChapterTitle: '',
+            completedCourseHrefs: [],
             skipPracticeBank: true,
             openedOuterAt: 0,
             updatedAt: Date.now()
@@ -245,23 +249,42 @@
             .filter((node) => node.querySelector(COURSE_LINK_SELECTOR));
         const container = containers[0];
         if (!container) return [];
-        return [...container.querySelectorAll(COURSE_LINK_SELECTOR)]
-            .filter(isVisible)
-            .map((node) => {
-                // Pick the closest ancestor that contains exactly this course button,
-                // rather than the outer category <li> which contains every course.
-                let item = node.parentElement;
-                while (item && item !== container) {
-                    if (item.querySelectorAll(COURSE_LINK_SELECTOR).length === 1
-                        && item.querySelector('h1, h2, h3, h4, h5, h6')) break;
-                    item = item.parentElement;
-                }
-                return {
-                    node,
-                    href: new URL(node.href, location.origin).href,
-                    title: cleanText(item?.querySelector('h1, h2, h3, h4, h5, h6')?.textContent || item?.textContent || node.parentElement?.textContent)
-                };
-            });
+        const knownComplete = new Set(getState().completedCourseHrefs || []);
+        const uniqueLinks = new Map();
+        for (const node of container.querySelectorAll(COURSE_LINK_SELECTOR)) {
+            const href = new URL(node.href, location.origin).href;
+            // Cards may contain both a title link and an “进入学习” link for the
+            // same course. Keep the first link so its title remains meaningful.
+            if (!uniqueLinks.has(href)) uniqueLinks.set(href, node);
+        }
+        return [...uniqueLinks.entries()].map(([href, node]) => {
+            // Find the smallest card whose course links all point to this href.
+            let item = node.parentElement;
+            while (item && item !== container) {
+                const hrefs = new Set([...item.querySelectorAll(COURSE_LINK_SELECTOR)]
+                    .map((link) => new URL(link.href, location.origin).href));
+                if (hrefs.size === 1) break;
+                item = item.parentElement;
+            }
+            const cardText = cleanText(item?.textContent || node.parentElement?.textContent);
+            const linkText = cleanText(node.textContent);
+            const heading = cleanText(item?.querySelector('h1, h2, h3, h4, h5, h6')?.textContent);
+            return {
+                node,
+                href,
+                title: heading || (linkText !== '进入学习' ? linkText : cardText),
+                completed: knownComplete.has(href) || /已完成\s*100%/.test(cardText)
+            };
+        });
+    }
+
+    function earliestPendingOuterIndex(state, categories) {
+        for (let index = 0; index < state.outerIndex; index += 1) {
+            const category = categories[index];
+            if (!category || (state.skipPracticeBank && isPracticeBank(category.title))) continue;
+            if (courseLinks(category.key).some(({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)))) return index;
+        }
+        return -1;
     }
 
     function chapterRows() {
@@ -358,8 +381,22 @@
         if (state.closePreviousCourse) {
             closeActiveCourseTab();
         }
+        // A prior run may have advanced past a partially completed category.
+        // At a safe course boundary, return to the earliest such category.
+        const earlierIndex = earliestPendingOuterIndex(state, outerCourses());
+        if (earlierIndex >= 0) {
+            setState({
+                phase: 'outer',
+                outerIndex: earlierIndex,
+                courseIndex: 0,
+                chapterIndex: 0,
+                closePreviousCourse: false,
+                message: '发现较早分类仍有未完成课程，返回按顺序继续。'
+            });
+            return;
+        }
         const links = courseLinks(state.currentOuterKey);
-        const next = selectNext(links, state.courseIndex, ({ title }) => !(state.skipPracticeBank && isPracticeBank(title)));
+        const next = selectNext(links, state.courseIndex, ({ title, completed }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
             setState({
                 phase: 'outer',
@@ -376,6 +413,7 @@
             chapterIndex: 0,
             closePreviousCourse: false,
             currentCourseTitle: next.item.title,
+            currentCourseHref: next.item.href,
             message: `进入二级课程：${next.item.title}`
         });
         // Open every secondary course in an extension-managed tab. This avoids popup blocking
@@ -393,11 +431,13 @@
         const rows = chapterRows();
         const next = selectNext(rows, state.chapterIndex, ({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
+            const completedCourseHrefs = [...new Set([...(state.completedCourseHrefs || []), state.currentCourseHref].filter(Boolean))];
             setState({
                 phase: 'outer-selected',
                 courseIndex: state.courseIndex + 1,
                 chapterIndex: 0,
                 closePreviousCourse: true,
+                completedCourseHrefs,
                 message: `二级课程“${state.currentCourseTitle}”已完成，正在关闭课程标签页。`
             });
             return;
