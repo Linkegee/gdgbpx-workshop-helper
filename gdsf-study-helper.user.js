@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.10
+// @version      0.1.11
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.10';
+    const VERSION = '0.1.11';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -53,6 +53,7 @@
             outerIndex: 0,
             courseIndex: 0,
             chapterIndex: 0,
+            closePreviousCourse: false,
             currentOuterTitle: '',
             currentOuterKey: '',
             currentCourseTitle: '',
@@ -293,7 +294,7 @@
             setState({ status: 'paused', message: '请先进入“年度学法”主页后再开始。' });
             return;
         }
-        setState({ status: 'running', phase: 'outer', message: '准备处理外层课程分类。', outerIndex: 0, courseIndex: 0, chapterIndex: 0 });
+        setState({ status: 'running', phase: 'outer', message: '准备处理外层课程分类。', outerIndex: 0, courseIndex: 0, chapterIndex: 0, closePreviousCourse: false });
         tick();
     }
 
@@ -351,9 +352,12 @@
     }
 
     function processCourse(state) {
-        // Runs only on the index tab. A completed child is closed here through
-        // the exact GM_openInTab handle before the next secondary course opens.
-        closeActiveCourseTab();
+        // Only close an exact child tab after that child's directory has confirmed
+        // every chapter complete. A manual restart while a chapter is timing must
+        // never close the still-active course tab.
+        if (state.closePreviousCourse) {
+            closeActiveCourseTab();
+        }
         const links = courseLinks(state.currentOuterKey);
         const next = selectNext(links, state.courseIndex, ({ title }) => !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
@@ -370,6 +374,7 @@
             phase: 'chapter-directory',
             courseIndex: next.index,
             chapterIndex: 0,
+            closePreviousCourse: false,
             currentCourseTitle: next.item.title,
             message: `进入二级课程：${next.item.title}`
         });
@@ -392,6 +397,7 @@
                 phase: 'outer-selected',
                 courseIndex: state.courseIndex + 1,
                 chapterIndex: 0,
+                closePreviousCourse: true,
                 message: `二级课程“${state.currentCourseTitle}”已完成，正在关闭课程标签页。`
             });
             return;
