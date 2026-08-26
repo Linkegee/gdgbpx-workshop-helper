@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.4
+// @version      0.1.5
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -13,13 +13,16 @@
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '0.1.4';
+    const VERSION = '0.1.5';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -29,12 +32,14 @@
     const OUTER_COURSE_SELECTOR = 'li[cl]';
     const COURSE_LINK_SELECTOR = 'a.btn[href^="/study/course/"]';
     const CHAPTER_SCORE_SELECTOR = '.chapter-score';
+    const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdsf-study-helper.user.js';
 
     let timer = null;
     let panel = null;
     let lastActionAt = 0;
     let completionStartedAt = 0;
     let lastScoreSnapshot = '';
+    let updateReady = false;
 
     function defaultState() {
         return {
@@ -108,6 +113,60 @@
     function recentLogs(limit = 40) {
         const logs = GM_getValue(LOG_KEY, []);
         return (Array.isArray(logs) ? logs : []).slice(-limit);
+    }
+
+    function compareVersions(left, right) {
+        const leftParts = String(left).split('.').map(Number);
+        const rightParts = String(right).split('.').map(Number);
+        const length = Math.max(leftParts.length, rightParts.length);
+        for (let index = 0; index < length; index += 1) {
+            const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+            if (difference) return difference;
+        }
+        return 0;
+    }
+
+    function renderUpdate(text = '', available = false) {
+        if (!panel) return;
+        const updateNode = panel.querySelector('[data-role="update"]');
+        const updateButton = panel.querySelector('[data-action="update"]');
+        if (updateNode) {
+            updateNode.hidden = !text;
+            updateNode.textContent = text;
+        }
+        if (updateButton) updateButton.hidden = !available;
+    }
+
+    function checkForUpdate() {
+        updateReady = false;
+        renderUpdate('正在检查更新…');
+        debugLog('info', 'update-check-started', { version: VERSION });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${UPDATE_URL}?installed=${encodeURIComponent(VERSION)}&checked=${Date.now()}`,
+            onload: (response) => {
+                const match = String(response.responseText || '').match(/^\/\/\s*@version\s+([^\s]+)/m);
+                const remoteVersion = match?.[1] || '';
+                if (response.status >= 200 && response.status < 300 && remoteVersion && compareVersions(remoteVersion, VERSION) > 0) {
+                    updateReady = true;
+                    renderUpdate(`发现 v${remoteVersion}，点击“更新”安装。`, true);
+                    debugLog('info', 'update-available', { installed: VERSION, remote: remoteVersion });
+                } else {
+                    renderUpdate(remoteVersion ? '当前已是最新版本。' : '未读取到远程版本。');
+                    debugLog('info', 'update-check-finished', { installed: VERSION, remote: remoteVersion, status: response.status });
+                }
+            },
+            onerror: (error) => {
+                renderUpdate('检查更新失败，请稍后重试。');
+                debugLog('warn', 'update-check-failed', { error });
+            }
+        });
+    }
+
+    function installAvailableUpdate() {
+        if (!updateReady) return;
+        debugLog('info', 'update-install-opened');
+        GM_openInTab(UPDATE_URL, { active: true, insert: true, setParent: true });
     }
 
     function cleanText(value) {
@@ -418,6 +477,7 @@
             <p data-role="status"></p>
             <p data-role="message"></p>
             <p class="muted" data-role="current"></p>
+            <p class="muted" data-role="update" hidden></p>
             <div class="actions">
                 <button data-action="start">开始</button>
                 <button data-action="resume">继续</button>
@@ -425,6 +485,8 @@
                 <button class="danger" data-action="stop">停止</button>
                 <button data-action="reset">重置</button>
                 <button data-action="logs">日志</button>
+                <button data-action="check-update">检查更新</button>
+                <button data-action="update" hidden>更新</button>
             </div>`;
         panel.addEventListener('click', (event) => {
             const action = event.target.closest('button')?.dataset.action;
@@ -433,6 +495,8 @@
             if (action === 'pause') pause();
             if (action === 'stop') stop();
             if (action === 'reset') reset();
+            if (action === 'check-update') checkForUpdate();
+            if (action === 'update') installAvailableUpdate();
             if (action === 'logs') {
                 const logNode = panel.querySelector('[data-role="log"]');
                 logNode.hidden = !logNode.hidden;
@@ -455,3 +519,4 @@
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
+
