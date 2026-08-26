@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.15
+// @version      0.1.16
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.15';
+    const VERSION = '0.1.16';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const PANEL_COLLAPSED_KEY = 'gdsf_study_helper_panel_collapsed_v1';
@@ -255,9 +255,6 @@
             .filter((node) => node.querySelector(COURSE_LINK_SELECTOR));
         const container = containers[0];
         if (!container) return [];
-        const state = getState();
-        const knownComplete = new Set(state.completedCourseHrefs || []);
-        const homeStatus = state.homeCourseStatusByHref || {};
         const uniqueLinks = new Map();
         for (const node of container.querySelectorAll(COURSE_LINK_SELECTOR)) {
             const href = new URL(node.href, location.origin).href;
@@ -281,7 +278,9 @@
                 node,
                 href,
                 title: heading || (linkText !== '进入学习' ? linkText : cardText),
-                completed: knownComplete.has(href) || homeStatus[href]?.completed || /已完成\s*100%/.test(cardText)
+                // Homepage percentages can be stale. Completion is only trusted
+                // after this script verifies every chapter in the course directory.
+                completed: false
             };
         });
     }
@@ -338,15 +337,6 @@
         });
     }
 
-    function earliestPendingOuterIndex(state, categories) {
-        for (let index = 0; index < state.outerIndex; index += 1) {
-            const category = categories[index];
-            if (!category || (state.skipPracticeBank && isPracticeBank(category.title))) continue;
-            if (courseLinks(category.key).some(({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)))) return index;
-        }
-        return -1;
-    }
-
     function chapterRows() {
         // Each readable chapter has a direct /chapter/ link. Its enclosing table gains “获得X学分” on completion.
         return [...document.querySelectorAll('a[href*="/chapter/"]')]
@@ -377,7 +367,7 @@
             setState({ status: 'paused', message: '请先进入“年度学法”主页后再开始。' });
             return;
         }
-        setState({ status: 'running', phase: 'outer', message: '准备处理外层课程分类。', outerIndex: 0, courseIndex: 0, chapterIndex: 0, closePreviousCourse: false });
+        setState({ status: 'running', phase: 'outer', message: '从首项开始逐门核验课程目录。', outerIndex: 0, courseIndex: 0, chapterIndex: 0, completedCourseHrefs: [], closePreviousCourse: false });
         tick();
     }
 
@@ -388,6 +378,11 @@
     function resume() {
         const state = getState();
         if (state.status === 'complete') return;
+        if (isStudyIndex() && (state.phase === 'idle' || state.status === 'stopped')) {
+            setState({ status: 'running', phase: 'outer', message: '从首项开始逐门核验课程目录。', outerIndex: 0, courseIndex: 0, chapterIndex: 0, completedCourseHrefs: [], closePreviousCourse: false });
+            tick();
+            return;
+        }
         let phase = state.phase;
         if (phase === 'idle') {
             if (isChapterPage()) phase = 'await-score';
@@ -441,22 +436,13 @@
         if (state.closePreviousCourse) {
             closeActiveCourseTab();
         }
-        // A prior run may have advanced past a partially completed category.
-        // At a safe course boundary, return to the earliest such category.
-        const earlierIndex = earliestPendingOuterIndex(state, outerCourses());
-        if (earlierIndex >= 0) {
-            setState({
-                phase: 'outer',
-                outerIndex: earlierIndex,
-                courseIndex: 0,
-                chapterIndex: 0,
-                closePreviousCourse: false,
-                message: '发现较早分类仍有未完成课程，返回按顺序继续。'
-            });
+        const links = courseLinks(state.currentOuterKey);
+        if (!links.length) {
+            setState({ status: 'paused', message: `未读取到分类“${state.currentOuterTitle}”的课程目录；不会跳过，请检查后继续。` });
             return;
         }
-        const links = courseLinks(state.currentOuterKey);
-        const next = selectNext(links, state.courseIndex, ({ title, completed }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
+        const verifiedCourses = new Set(state.completedCourseHrefs || []);
+        const next = selectNext(links, 0, ({ href, title }) => !verifiedCourses.has(href) && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
             setState({
                 phase: 'outer',
@@ -489,7 +475,11 @@
 
     function processChapterDirectory(state) {
         const rows = chapterRows();
-        const next = selectNext(rows, state.chapterIndex, ({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
+        if (!rows.length) {
+            setState({ status: 'paused', message: `未读取到“${state.currentCourseTitle}”的章节目录；不会跳过，请检查后继续。` });
+            return;
+        }
+        const next = selectNext(rows, 0, ({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
             const completedCourseHrefs = [...new Set([...(state.completedCourseHrefs || []), state.currentCourseHref].filter(Boolean))];
             setState({
