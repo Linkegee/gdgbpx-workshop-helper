@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.12
+// @version      0.1.13
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,13 +23,14 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.12';
+    const VERSION = '0.1.13';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
     const TICK_MS = 1200;
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
     const COMPLETION_TIMEOUT_MS = 90 * 60 * 1000;
+    const HOME_STATUS_REFRESH_MS = 60 * 1000;
     const OUTER_COURSE_SELECTOR = 'li[cl]';
     // Some categories expose the course title itself as the link, while others
     // use a separate “进入学习” button. Both forms must be discovered.
@@ -45,6 +46,8 @@
     let lastScoreSnapshot = '';
     let updateReady = false;
     let activeCourseTab = null;
+    let homeStatusRefreshAt = 0;
+    let homeStatusRefreshInFlight = false;
 
     function defaultState() {
         return {
@@ -62,6 +65,8 @@
             currentCourseHref: '',
             currentChapterTitle: '',
             completedCourseHrefs: [],
+            homeCourseStatusByHref: {},
+            homeStatusFetchedAt: 0,
             skipPracticeBank: true,
             openedOuterAt: 0,
             updatedAt: Date.now()
@@ -249,7 +254,9 @@
             .filter((node) => node.querySelector(COURSE_LINK_SELECTOR));
         const container = containers[0];
         if (!container) return [];
-        const knownComplete = new Set(getState().completedCourseHrefs || []);
+        const state = getState();
+        const knownComplete = new Set(state.completedCourseHrefs || []);
+        const homeStatus = state.homeCourseStatusByHref || {};
         const uniqueLinks = new Map();
         for (const node of container.querySelectorAll(COURSE_LINK_SELECTOR)) {
             const href = new URL(node.href, location.origin).href;
@@ -273,8 +280,60 @@
                 node,
                 href,
                 title: heading || (linkText !== '进入学习' ? linkText : cardText),
-                completed: knownComplete.has(href) || /已完成\s*100%/.test(cardText)
+                completed: knownComplete.has(href) || homeStatus[href]?.completed || /已完成\s*100%/.test(cardText)
             };
+        });
+    }
+
+    function readCourseStatusFromDocument(doc) {
+        const result = {};
+        for (const container of doc.querySelectorAll(OUTER_COURSE_SELECTOR)) {
+            if (!container.querySelector(COURSE_LINK_SELECTOR)) continue;
+            for (const node of container.querySelectorAll(COURSE_LINK_SELECTOR)) {
+                const href = new URL(node.getAttribute('href'), location.origin).href;
+                let item = node.parentElement;
+                while (item && item !== container) {
+                    const hrefs = new Set([...item.querySelectorAll(COURSE_LINK_SELECTOR)]
+                        .map((link) => new URL(link.getAttribute('href'), location.origin).href));
+                    if (hrefs.size === 1) break;
+                    item = item.parentElement;
+                }
+                const text = cleanText(item?.textContent || node.parentElement?.textContent);
+                result[href] = { completed: /已完成\s*100%/.test(text), text };
+            }
+        }
+        return result;
+    }
+
+    function refreshHomeCourseStatuses() {
+        if (!isStudyIndex() || homeStatusRefreshInFlight || Date.now() - homeStatusRefreshAt < HOME_STATUS_REFRESH_MS) return;
+        homeStatusRefreshAt = Date.now();
+        homeStatusRefreshInFlight = true;
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${location.origin}/study/index?_gdsf_status_sync=${Date.now()}`,
+            headers: { 'Cache-Control': 'no-cache' },
+            onload: (response) => {
+                homeStatusRefreshInFlight = false;
+                if (response.status < 200 || response.status >= 300) {
+                    debugLog('warn', 'home-status-refresh-failed', { status: response.status });
+                    return;
+                }
+                const snapshot = readCourseStatusFromDocument(new DOMParser().parseFromString(response.responseText, 'text/html'));
+                if (!Object.keys(snapshot).length) {
+                    debugLog('warn', 'home-status-refresh-empty');
+                    return;
+                }
+                const state = getState();
+                if (JSON.stringify(state.homeCourseStatusByHref || {}) !== JSON.stringify(snapshot)) {
+                    setState({ homeCourseStatusByHref: snapshot, homeStatusFetchedAt: Date.now() });
+                    debugLog('info', 'home-status-refreshed', { courses: Object.keys(snapshot).length });
+                }
+            },
+            onerror: (error) => {
+                homeStatusRefreshInFlight = false;
+                debugLog('warn', 'home-status-refresh-error', { error });
+            }
         });
     }
 
@@ -498,6 +557,9 @@
         renderPanel(state);
         if (state.status !== 'running') return;
         if (isStudyIndex()) {
+            // Synchronize course-card status in the background without reloading
+            // or navigating the persistent homepage tab.
+            refreshHomeCourseStatuses();
             if (state.phase === 'outer') processIndex(state);
             else if (state.phase === 'outer-selected') processCourse(state);
             // Parent index tabs intentionally wait while their child course tab is active.
