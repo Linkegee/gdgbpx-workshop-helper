@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.3
+// @version      0.1.4
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -19,8 +19,10 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.3';
+    const VERSION = '0.1.4';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
+    const LOG_KEY = 'gdsf_study_helper_logs_v1';
+    const MAX_LOG_ENTRIES = 350;
     const TICK_MS = 1200;
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
     const COMPLETION_TIMEOUT_MS = 90 * 60 * 1000;
@@ -32,6 +34,7 @@
     let panel = null;
     let lastActionAt = 0;
     let completionStartedAt = 0;
+    let lastScoreSnapshot = '';
 
     function defaultState() {
         return {
@@ -58,10 +61,53 @@
     }
 
     function setState(change) {
-        const next = { ...getState(), ...change, version: VERSION, updatedAt: Date.now() };
+        const previous = getState();
+        const next = { ...previous, ...change, version: VERSION, updatedAt: Date.now() };
         GM_setValue(STATE_KEY, next);
+        if (previous.status !== next.status || previous.phase !== next.phase || previous.message !== next.message) {
+            debugLog('info', 'state-change', {
+                status: next.status,
+                phase: next.phase,
+                message: next.message,
+                outer: next.currentOuterTitle,
+                course: next.currentCourseTitle,
+                chapter: next.currentChapterTitle
+            });
+        }
         renderPanel(next);
         return next;
+    }
+
+    function normalizeLogValue(value) {
+        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack?.slice(0, 800) };
+        if (typeof value === 'string') return value.slice(0, 800);
+        if (!value || typeof value !== 'object') return value;
+        try {
+            return JSON.parse(JSON.stringify(value, (_key, item) => {
+                if (item instanceof Error) return { name: item.name, message: item.message };
+                if (typeof item === 'string') return item.slice(0, 800);
+                return item;
+            }));
+        } catch (_error) {
+            return String(value).slice(0, 800);
+        }
+    }
+
+    function debugLog(level, event, data = {}) {
+        const entry = { at: new Date().toISOString(), level, event, data: normalizeLogValue(data), url: location.href };
+        const logs = GM_getValue(LOG_KEY, []);
+        const next = Array.isArray(logs) ? logs : [];
+        next.push(entry);
+        if (next.length > MAX_LOG_ENTRIES) next.splice(0, next.length - MAX_LOG_ENTRIES);
+        GM_setValue(LOG_KEY, next);
+        const writer = console[level] || console.log;
+        writer.call(console, '[学法学习助手]', event, entry.data);
+        renderLog();
+    }
+
+    function recentLogs(limit = 40) {
+        const logs = GM_getValue(LOG_KEY, []);
+        return (Array.isArray(logs) ? logs : []).slice(-limit);
     }
 
     function cleanText(value) {
@@ -148,6 +194,7 @@
     }
 
     function clickNode(node) {
+        debugLog('info', 'click-node', { text: cleanText(node.textContent), href: node.href || null });
         node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         setTimeout(() => node.click(), 250);
     }
@@ -273,6 +320,11 @@
         }
         window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
         const complete = score.classList.contains('chapter-score-suc');
+        const scoreSnapshot = `${score.className}|${cleanText(score.textContent)}`;
+        if (scoreSnapshot !== lastScoreSnapshot) {
+            lastScoreSnapshot = scoreSnapshot;
+            debugLog('info', 'chapter-score-observed', { className: score.className, text: cleanText(score.textContent), complete });
+        }
         if (complete) {
             completionStartedAt = 0;
             setState({ phase: 'confirm-directory', message: `章节已获学分，返回目录确认：${state.currentChapterTitle}` });
@@ -332,6 +384,19 @@
         panel.querySelector('[data-role="current"]').textContent = [state.currentOuterTitle, state.currentCourseTitle, state.currentChapterTitle].filter(Boolean).join(' › ') || '尚未选择课程';
         panel.querySelector('[data-action="start"]').disabled = !isStudyIndex() || state.status === 'running';
         panel.querySelector('[data-action="resume"]').disabled = state.status === 'running' || state.status === 'complete';
+        renderLog();
+    }
+
+    function renderLog() {
+        if (!panel) return;
+        const logNode = panel.querySelector('[data-role="log"]');
+        if (!logNode || logNode.hidden) return;
+        logNode.textContent = recentLogs().map((entry) => {
+            const time = entry.at.slice(11, 19);
+            const detail = entry.data && Object.keys(entry.data).length ? ` ${JSON.stringify(entry.data)}` : '';
+            return `${time} [${entry.level}] ${entry.event}${detail}`;
+        }).join('\n');
+        logNode.scrollTop = logNode.scrollHeight;
     }
 
     function createPanel() {
@@ -344,6 +409,7 @@
             #gdsf-study-helper button { border: 0; border-radius: 5px; padding: 5px 7px; cursor: pointer; background: #fff; color: #102a53; font-size: 12px; }
             #gdsf-study-helper button.danger { background: #e75b5b; color: #fff; }
             #gdsf-study-helper button:disabled { opacity: .48; cursor: not-allowed; }
+            #gdsf-study-helper pre { max-height: 185px; margin: 7px 0 0; padding: 6px; overflow: auto; border-radius: 5px; background: rgba(0,0,0,.22); color: #d6e5f6; font: 10px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
         `);
         panel = document.createElement('aside');
         panel.id = 'gdsf-study-helper';
@@ -358,6 +424,7 @@
                 <button data-action="pause">暂停</button>
                 <button class="danger" data-action="stop">停止</button>
                 <button data-action="reset">重置</button>
+                <button data-action="logs">日志</button>
             </div>`;
         panel.addEventListener('click', (event) => {
             const action = event.target.closest('button')?.dataset.action;
@@ -366,11 +433,23 @@
             if (action === 'pause') pause();
             if (action === 'stop') stop();
             if (action === 'reset') reset();
+            if (action === 'logs') {
+                const logNode = panel.querySelector('[data-role="log"]');
+                logNode.hidden = !logNode.hidden;
+                renderLog();
+            }
         });
+        const logNode = document.createElement('pre');
+        logNode.dataset.role = 'log';
+        logNode.hidden = true;
+        panel.appendChild(logNode);
         document.documentElement.appendChild(panel);
         renderPanel(getState());
     }
 
+    window.addEventListener('error', (event) => debugLog('error', 'window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
+    window.addEventListener('unhandledrejection', (event) => debugLog('error', 'unhandled-rejection', { reason: event.reason }));
+    debugLog('info', 'script-boot', { version: VERSION, path: location.pathname });
     createPanel();
     GM_addValueChangeListener(STATE_KEY, () => renderPanel(getState()));
     timer = window.setInterval(tick, TICK_MS);
