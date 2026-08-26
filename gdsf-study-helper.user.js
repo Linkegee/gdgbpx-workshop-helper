@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.8
+// @version      0.1.9
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -15,6 +15,7 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
+// @grant        GM_closeTab
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @run-at       document-idle
@@ -23,7 +24,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.8';
+    const VERSION = '0.1.9';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -177,6 +178,23 @@
         if (!updateReady) return;
         debugLog('info', 'update-install-opened');
         GM_openInTab(UPDATE_URL, { active: true, insert: true, setParent: true });
+    }
+
+    function closeCurrentCourseTab(courseTitle) {
+        debugLog('info', 'course-tab-close-requested', { course: courseTitle });
+        try {
+            if (typeof GM_closeTab === 'function') {
+                GM_closeTab();
+                return;
+            }
+        } catch (error) {
+            debugLog('warn', 'gm-course-tab-close-failed', { error, course: courseTitle });
+        }
+        try {
+            window.close();
+        } catch (error) {
+            debugLog('warn', 'window-course-tab-close-failed', { error, course: courseTitle });
+        }
     }
 
     function cleanText(value) {
@@ -379,10 +397,8 @@
                 message: `二级课程“${state.currentCourseTitle}”已完成，正在关闭课程标签页。`
             });
             setTimeout(() => {
-                // The tab was created with GM_openInTab; closing it must never navigate a
-                // non-popup page backwards, because that could discard the course homepage.
-                debugLog('info', 'course-tab-close-requested', { course: state.currentCourseTitle });
-                window.close();
+                // Never navigate backwards here: the parent index tab must stay intact.
+                closeCurrentCourseTab(state.currentCourseTitle);
             }, 500);
             return;
         }
