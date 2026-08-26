@@ -32,7 +32,8 @@
     const TICK_MS = 1200;
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
     const COMPLETION_TIMEOUT_MS = 90 * 60 * 1000;
-    const HOME_STATUS_REFRESH_MS = 60 * 1000;
+    // This is a background request only: it never reloads or navigates the homepage.
+    const HOME_STATUS_REFRESH_MS = 30 * 1000;
     const OUTER_COURSE_SELECTOR = 'li[cl]';
     // Some categories expose the course title itself as the link, while others
     // use a separate “进入学习” button. Both forms must be discovered.
