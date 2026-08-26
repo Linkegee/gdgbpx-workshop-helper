@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.6
+// @version      0.1.7
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -16,13 +16,14 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @connect      raw.githubusercontent.com
+// @connect      api.github.com
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '0.1.6';
+    const VERSION = '0.1.7';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -33,6 +34,7 @@
     const COURSE_LINK_SELECTOR = 'a.btn[href^="/study/course/"]';
     const CHAPTER_SCORE_SELECTOR = '.chapter-score';
     const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdsf-study-helper.user.js';
+    const UPDATE_CHECK_URL = 'https://api.github.com/repos/Linkegee/gdgbpx-workshop-helper/contents/gdsf-study-helper.user.js';
 
     let timer = null;
     let panel = null;
@@ -143,9 +145,17 @@
         debugLog('info', 'update-check-started', { version: VERSION });
         GM_xmlhttpRequest({
             method: 'GET',
-            url: `${UPDATE_URL}?installed=${encodeURIComponent(VERSION)}&checked=${Date.now()}`,
+            url: UPDATE_CHECK_URL,
+            headers: { Accept: 'application/vnd.github+json' },
             onload: (response) => {
-                const match = String(response.responseText || '').match(/^\/\/\s*@version\s+([^\s]+)/m);
+                let remoteSource = '';
+                try {
+                    const payload = JSON.parse(response.responseText || '{}');
+                    remoteSource = atob(String(payload.content || '').replace(/\s/g, ''));
+                } catch (error) {
+                    debugLog('warn', 'update-response-parse-failed', { error });
+                }
+                const match = remoteSource.match(/^\/\/\s*@version\s+([^\s]+)/m);
                 const remoteVersion = match?.[1] || '';
                 if (response.status >= 200 && response.status < 300 && remoteVersion && compareVersions(remoteVersion, VERSION) > 0) {
                     updateReady = true;
