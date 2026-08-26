@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.14
+// @version      0.1.15
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,9 +23,10 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.14';
+    const VERSION = '0.1.15';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
+    const PANEL_COLLAPSED_KEY = 'gdsf_study_helper_panel_collapsed_v1';
     const MAX_LOG_ENTRIES = 350;
     const TICK_MS = 1200;
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
@@ -609,6 +610,8 @@
     function createPanel() {
         GM_addStyle(`
             #gdsf-study-helper { position: fixed; left: 14px; bottom: 14px; z-index: 2147483647; width: 265px; padding: 10px 11px; border-radius: 9px; background: rgba(16,42,83,.96); color: #fff; font: 13px/1.35 system-ui, sans-serif; box-shadow: 0 7px 22px rgba(0,0,0,.25); }
+            #gdsf-study-helper.collapsed { width: 38px; height: 38px; padding: 0; border-radius: 50%; background: #1677d2; }
+            #gdsf-study-helper.collapsed .panel-main { display: none; }
             #gdsf-study-helper h2 { margin: 0 0 5px; font-size: 14px; }
             #gdsf-study-helper p { margin: 4px 0; word-break: break-word; }
             #gdsf-study-helper .muted { color: #bed0e8; font-size: 11px; max-height: 32px; overflow: hidden; }
@@ -616,28 +619,43 @@
             #gdsf-study-helper button { border: 0; border-radius: 5px; padding: 5px 7px; cursor: pointer; background: #fff; color: #102a53; font-size: 12px; }
             #gdsf-study-helper button.danger { background: #e75b5b; color: #fff; }
             #gdsf-study-helper button:disabled { opacity: .48; cursor: not-allowed; }
+            #gdsf-study-helper .collapse-toggle { position: absolute; top: 6px; right: 6px; min-width: 22px; padding: 2px 6px; font-weight: 700; }
+            #gdsf-study-helper.collapsed .collapse-toggle { position: static; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: transparent; color: #fff; font-size: 17px; }
             #gdsf-study-helper pre { max-height: 185px; margin: 7px 0 0; padding: 6px; overflow: auto; border-radius: 5px; background: rgba(0,0,0,.22); color: #d6e5f6; font: 10px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
         `);
         panel = document.createElement('aside');
         panel.id = 'gdsf-study-helper';
         panel.innerHTML = `
-            <h2>学习助手 <span class="muted">v${VERSION}</span></h2>
-            <p data-role="status"></p>
-            <p data-role="message"></p>
-            <p class="muted" data-role="current"></p>
-            <p class="muted" data-role="update" hidden></p>
-            <div class="actions">
-                <button data-action="start">开始</button>
-                <button data-action="resume">继续</button>
-                <button data-action="pause">暂停</button>
-                <button class="danger" data-action="stop">停止</button>
-                <button data-action="reset">重置</button>
-                <button data-action="logs">日志</button>
-                <button data-action="check-update">检查更新</button>
-                <button data-action="update" hidden>更新</button>
+            <button class="collapse-toggle" data-action="collapse" title="收起面板" aria-label="收起面板">−</button>
+            <div class="panel-main">
+                <h2>学习助手 <span class="muted">v${VERSION}</span></h2>
+                <p data-role="status"></p>
+                <p data-role="message"></p>
+                <p class="muted" data-role="current"></p>
+                <p class="muted" data-role="update" hidden></p>
+                <div class="actions">
+                    <button data-action="start">开始</button>
+                    <button data-action="resume">继续</button>
+                    <button data-action="pause">暂停</button>
+                    <button class="danger" data-action="stop">停止</button>
+                    <button data-action="reset">重置</button>
+                    <button data-action="logs">日志</button>
+                    <button data-action="check-update">检查更新</button>
+                    <button data-action="update" hidden>更新</button>
+                </div>
             </div>`;
+        function setCollapsed(collapsed, persist = true) {
+            panel.classList.toggle('collapsed', collapsed);
+            const button = panel.querySelector('[data-action="collapse"]');
+            button.textContent = collapsed ? '学' : '−';
+            button.title = collapsed ? '展开学习助手' : '收起面板';
+            button.setAttribute('aria-label', button.title);
+            if (persist) GM_setValue(PANEL_COLLAPSED_KEY, collapsed);
+        }
+        setCollapsed(Boolean(GM_getValue(PANEL_COLLAPSED_KEY, false)), false);
         panel.addEventListener('click', (event) => {
             const action = event.target.closest('button')?.dataset.action;
+            if (action === 'collapse') setCollapsed(!panel.classList.contains('collapsed'));
             if (action === 'start') start();
             if (action === 'resume') resume();
             if (action === 'pause') pause();
@@ -654,7 +672,7 @@
         const logNode = document.createElement('pre');
         logNode.dataset.role = 'log';
         logNode.hidden = true;
-        panel.appendChild(logNode);
+        panel.querySelector('.panel-main').appendChild(logNode);
         document.documentElement.appendChild(panel);
         renderPanel(getState());
     }
