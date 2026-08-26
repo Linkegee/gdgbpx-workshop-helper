@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.16
+// @version      0.1.17
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.16';
+    const VERSION = '0.1.17';
+    const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const PANEL_COLLAPSED_KEY = 'gdsf_study_helper_panel_collapsed_v1';
@@ -66,6 +67,7 @@
             currentCourseHref: '',
             currentChapterTitle: '',
             completedCourseHrefs: [],
+            strictVerificationVersion: 0,
             homeCourseStatusByHref: {},
             homeStatusFetchedAt: 0,
             skipPracticeBank: true,
@@ -95,6 +97,21 @@
         }
         renderPanel(next);
         return next;
+    }
+
+    function initializeStrictVerification() {
+        const state = getState();
+        if (state.strictVerificationVersion === STRICT_VERIFICATION_VERSION) return;
+        // This deliberately clears only the script's old optimisation cache.
+        // Platform-earned credits and the current chapter state are untouched.
+        GM_setValue(STATE_KEY, {
+            ...state,
+            version: VERSION,
+            completedCourseHrefs: [],
+            strictVerificationVersion: STRICT_VERIFICATION_VERSION,
+            updatedAt: Date.now()
+        });
+        debugLog('info', 'strict-verification-initialized');
     }
 
     function normalizeLogValue(value) {
@@ -669,6 +686,7 @@
 
     window.addEventListener('error', (event) => debugLog('error', 'window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
     window.addEventListener('unhandledrejection', (event) => debugLog('error', 'unhandled-rejection', { reason: event.reason }));
+    initializeStrictVerification();
     debugLog('info', 'script-boot', { version: VERSION, path: location.pathname });
     createPanel();
     GM_addValueChangeListener(STATE_KEY, () => renderPanel(getState()));
