@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.5
+// @version      0.1.6
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.5';
+    const VERSION = '0.1.6';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
     const MAX_LOG_ENTRIES = 350;
@@ -281,7 +281,14 @@
     function resume() {
         const state = getState();
         if (state.status === 'complete') return;
-        setState({ status: 'running', message: '已继续。' });
+        let phase = state.phase;
+        if (phase === 'idle') {
+            if (isChapterPage()) phase = 'await-score';
+            else if (isCoursePage()) phase = 'chapter-directory';
+            else if (isStudyIndex()) phase = state.currentOuterKey ? 'outer-selected' : 'outer';
+            debugLog('info', 'phase-recovered-on-resume', { from: state.phase, to: phase, path: location.pathname });
+        }
+        setState({ status: 'running', phase, message: '已继续。' });
         tick();
     }
 
@@ -430,6 +437,10 @@
             return;
         }
         if (isChapterPage()) {
+            if (state.phase === 'idle') {
+                setState({ phase: 'await-score', message: '已从当前章节恢复学习流程。' });
+                return;
+            }
             if (['chapter', 'await-score', 'confirm-directory'].includes(state.phase)) processChapter(state);
             return;
         }
