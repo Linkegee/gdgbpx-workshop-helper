@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.17
+// @version      0.1.18
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.17';
+    const VERSION = '0.1.18';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -70,6 +70,7 @@
             strictVerificationVersion: 0,
             homeCourseStatusByHref: {},
             homeStatusFetchedAt: 0,
+            homeProgressPercent: null,
             skipPracticeBank: true,
             openedOuterAt: 0,
             updatedAt: Date.now()
@@ -322,6 +323,28 @@
         return result;
     }
 
+    function readHomeProgress(doc) {
+        const progressCard = [...doc.querySelectorAll('.card.schedule')]
+            .find((card) => /学习进度/.test(cleanText(card.querySelector('h5')?.textContent)));
+        const text = cleanText(progressCard?.querySelector('.progressbar-text')?.textContent || progressCard?.textContent);
+        const match = text.match(/(\d+(?:\.\d+)?)\s*%/);
+        return {
+            percent: match ? Number(match[1]) : null,
+            container: progressCard?.querySelector('#container') || null
+        };
+    }
+
+    function syncHomeProgress(progress) {
+        const progressCard = [...document.querySelectorAll('.card.schedule')]
+            .find((card) => /学习进度/.test(cleanText(card.querySelector('h5')?.textContent)));
+        const localContainer = progressCard?.querySelector('#container');
+        if (!localContainer || !progress.container) return false;
+        // Replace only the circular progress widget. The persistent homepage and
+        // its course list stay untouched, so the active workflow cannot jump.
+        localContainer.innerHTML = progress.container.innerHTML;
+        return true;
+    }
+
     function refreshHomeCourseStatuses() {
         if (!isStudyIndex() || homeStatusRefreshInFlight || Date.now() - homeStatusRefreshAt < HOME_STATUS_REFRESH_MS) return;
         homeStatusRefreshAt = Date.now();
@@ -336,15 +359,32 @@
                     debugLog('warn', 'home-status-refresh-failed', { status: response.status });
                     return;
                 }
-                const snapshot = readCourseStatusFromDocument(new DOMParser().parseFromString(response.responseText, 'text/html'));
+                const remoteDocument = new DOMParser().parseFromString(response.responseText, 'text/html');
+                const snapshot = readCourseStatusFromDocument(remoteDocument);
                 if (!Object.keys(snapshot).length) {
                     debugLog('warn', 'home-status-refresh-empty');
                     return;
                 }
                 const state = getState();
+                const progress = readHomeProgress(remoteDocument);
+                const progressWidgetUpdated = syncHomeProgress(progress);
+                if (progress.percent !== null && progress.percent >= 100 && state.status === 'running') {
+                    setState({
+                        status: 'complete',
+                        phase: 'idle',
+                        message: '主页学习进度已达 100%，已自动停止。',
+                        homeProgressPercent: progress.percent,
+                        homeStatusFetchedAt: Date.now()
+                    });
+                    debugLog('info', 'home-progress-complete-stop', { percent: progress.percent, progressWidgetUpdated });
+                    return;
+                }
                 if (JSON.stringify(state.homeCourseStatusByHref || {}) !== JSON.stringify(snapshot)) {
-                    setState({ homeCourseStatusByHref: snapshot, homeStatusFetchedAt: Date.now() });
-                    debugLog('info', 'home-status-refreshed', { courses: Object.keys(snapshot).length });
+                    setState({ homeCourseStatusByHref: snapshot, homeProgressPercent: progress.percent, homeStatusFetchedAt: Date.now() });
+                    debugLog('info', 'home-status-refreshed', { courses: Object.keys(snapshot).length, progress: progress.percent, progressWidgetUpdated });
+                } else if (progress.percent !== state.homeProgressPercent) {
+                    setState({ homeProgressPercent: progress.percent, homeStatusFetchedAt: Date.now() });
+                    debugLog('info', 'home-progress-refreshed', { progress: progress.percent, progressWidgetUpdated });
                 }
             },
             onerror: (error) => {
@@ -693,4 +733,5 @@
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
+
 
