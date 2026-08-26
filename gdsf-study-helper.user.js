@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.2
+// @version      0.1.3
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -19,7 +19,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.2';
+    const VERSION = '0.1.3';
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const TICK_MS = 1200;
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
@@ -336,28 +336,28 @@
 
     function createPanel() {
         GM_addStyle(`
-            #gdsf-study-helper { position: fixed; right: 18px; bottom: 18px; z-index: 2147483647; width: 340px; padding: 14px; border-radius: 12px; background: #102a53; color: #fff; font: 14px/1.45 system-ui, sans-serif; box-shadow: 0 10px 34px rgba(0,0,0,.3); }
-            #gdsf-study-helper h2 { margin: 0 0 8px; font-size: 15px; }
-            #gdsf-study-helper p { margin: 6px 0; word-break: break-word; }
-            #gdsf-study-helper .muted { color: #bed0e8; font-size: 12px; }
-            #gdsf-study-helper .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-            #gdsf-study-helper button { border: 0; border-radius: 6px; padding: 6px 9px; cursor: pointer; background: #fff; color: #102a53; }
+            #gdsf-study-helper { position: fixed; left: 14px; bottom: 14px; z-index: 2147483647; width: 265px; padding: 10px 11px; border-radius: 9px; background: rgba(16,42,83,.96); color: #fff; font: 13px/1.35 system-ui, sans-serif; box-shadow: 0 7px 22px rgba(0,0,0,.25); }
+            #gdsf-study-helper h2 { margin: 0 0 5px; font-size: 14px; }
+            #gdsf-study-helper p { margin: 4px 0; word-break: break-word; }
+            #gdsf-study-helper .muted { color: #bed0e8; font-size: 11px; max-height: 32px; overflow: hidden; }
+            #gdsf-study-helper .actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+            #gdsf-study-helper button { border: 0; border-radius: 5px; padding: 5px 7px; cursor: pointer; background: #fff; color: #102a53; font-size: 12px; }
             #gdsf-study-helper button.danger { background: #e75b5b; color: #fff; }
             #gdsf-study-helper button:disabled { opacity: .48; cursor: not-allowed; }
         `);
         panel = document.createElement('aside');
         panel.id = 'gdsf-study-helper';
         panel.innerHTML = `
-            <h2>学法学习助手 <span class="muted">v${VERSION}</span></h2>
+            <h2>学习助手 <span class="muted">v${VERSION}</span></h2>
             <p data-role="status"></p>
             <p data-role="message"></p>
             <p class="muted" data-role="current"></p>
             <div class="actions">
-                <button data-action="start">从年度学法开始</button>
+                <button data-action="start">开始</button>
                 <button data-action="resume">继续</button>
                 <button data-action="pause">暂停</button>
                 <button class="danger" data-action="stop">停止</button>
-                <button data-action="reset">重置进度</button>
+                <button data-action="reset">重置</button>
             </div>`;
         panel.addEventListener('click', (event) => {
             const action = event.target.closest('button')?.dataset.action;
@@ -376,4 +376,3 @@
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
-
