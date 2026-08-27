@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.23
+// @version      0.1.24
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.23';
+    const VERSION = '0.1.24';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -357,6 +357,26 @@
         return true;
     }
 
+    function stopForCompletedHomeProgress(state, progress, source) {
+        if (
+            progress.percent === null ||
+            progress.percent < 100 ||
+            state.autoStopAt100 === false ||
+            state.status !== 'running'
+        ) {
+            return false;
+        }
+        setState({
+            status: 'complete',
+            phase: 'idle',
+            message: '主页学习进度已达 100%，已自动停止。',
+            homeProgressPercent: progress.percent,
+            homeStatusFetchedAt: Date.now()
+        });
+        debugLog('info', 'home-progress-complete-stop', { percent: progress.percent, source });
+        return true;
+    }
+
     function refreshHomeCourseStatuses() {
         if (!isStudyIndex() || homeStatusRefreshInFlight || Date.now() - homeStatusRefreshAt < HOME_STATUS_REFRESH_MS) return;
         homeStatusRefreshAt = Date.now();
@@ -373,22 +393,15 @@
                 }
                 const remoteDocument = new DOMParser().parseFromString(response.responseText, 'text/html');
                 const snapshot = readCourseStatusFromDocument(remoteDocument);
-                if (!Object.keys(snapshot).length) {
-                    debugLog('warn', 'home-status-refresh-empty');
-                    return;
-                }
                 const state = getState();
                 const progress = readHomeProgress(remoteDocument);
                 const progressWidgetUpdated = syncHomeProgress(progress);
-                if (progress.percent !== null && progress.percent >= 100 && state.autoStopAt100 !== false && state.status === 'running') {
-                    setState({
-                        status: 'complete',
-                        phase: 'idle',
-                        message: '主页学习进度已达 100%，已自动停止。',
-                        homeProgressPercent: progress.percent,
-                        homeStatusFetchedAt: Date.now()
-                    });
-                    debugLog('info', 'home-progress-complete-stop', { percent: progress.percent, progressWidgetUpdated });
+                if (stopForCompletedHomeProgress(state, progress, 'background-sync')) {
+                    return;
+                }
+
+                if (!Object.keys(snapshot).length) {
+                    debugLog('warn', 'home-status-refresh-empty', { progress: progress.percent, progressWidgetUpdated });
                     return;
                 }
                 if (JSON.stringify(state.homeCourseStatusByHref || {}) !== JSON.stringify(snapshot)) {
@@ -399,7 +412,6 @@
                     debugLog('info', 'home-progress-refreshed', { progress: progress.percent, progressWidgetUpdated });
                 }
             },
-
             onerror: (error) => {
                 homeStatusRefreshInFlight = false;
                 debugLog('warn', 'home-status-refresh-error', { error });
@@ -588,6 +600,7 @@
         } catch (error) {
             debugLog('error', 'course-tab-open-failed', { error, href: next.item.href });
             setState({ status: 'paused', message: '无法在新标签打开二级课程，请检查浏览器后继续。' });
+
         }
     }
 
@@ -600,7 +613,6 @@
         const next = selectNext(rows, 0, ({ completed, title }) => !completed && !(state.skipPracticeBank && isPracticeBank(title)));
         if (!next) {
             const completedCourseHrefs = [...new Set([...(state.completedCourseHrefs || []), state.currentCourseHref].filter(Boolean))];
-
             setState({
                 phase: 'outer-selected',
                 courseIndex: state.courseIndex + 1,
@@ -789,11 +801,15 @@ const complete =
         });
     }
 
+
     function tick() {
         const state = getState();
         renderPanel(state);
         if (state.status !== 'running') return;
         if (isStudyIndex()) {
+            // The visible ring is checked every tick. This avoids a delayed or
+            // empty background response preventing the configured 100% stop.
+            if (stopForCompletedHomeProgress(state, readHomeProgress(document), 'visible-homepage')) return;
             // Synchronize course-card status in the background without reloading
             // or navigating the persistent homepage tab.
             refreshHomeCourseStatuses();
@@ -801,7 +817,6 @@ const complete =
             else if (state.phase === 'outer-selected') processCourse(state);
             // Parent index tabs intentionally wait while their child course tab is active.
             return;
-
         }
         if (isCoursePage()) {
             if (state.phase === 'chapter-directory') processChapterDirectory(state);
@@ -984,7 +999,6 @@ if (modeButton) {
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
-
 
 
 
