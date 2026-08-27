@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.25
+// @version      0.1.26
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.25';
+    const VERSION = '0.1.26';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -339,9 +339,13 @@
         const progressCard = [...doc.querySelectorAll('.card.schedule')]
             .find((card) => /学习进度/.test(cleanText(card.querySelector('h5')?.textContent)));
         const text = cleanText(progressCard?.querySelector('.progressbar-text')?.textContent || progressCard?.textContent);
-        const match = text.match(/(\d+(?:\.\d+)?)\s*%/);
+        const visibleMatch = text.match(/(\d+(?:\.\d+)?)\s*%/);
+        // On a background response ProgressBar has not run, but the server's
+        // inline initializer still carries the authoritative percentage.
+        const scriptText = [...doc.scripts].map((script) => script.textContent || '').join('\n');
+        const scriptMatch = scriptText.match(/bar\.animate\(\s*(\d+(?:\.\d+)?)\s*\/\s*100\s*\)/);
         return {
-            percent: match ? Number(match[1]) : null,
+            percent: visibleMatch ? Number(visibleMatch[1]) : (scriptMatch ? Number(scriptMatch[1]) : null),
             container: progressCard?.querySelector('#container') || null
         };
     }
@@ -350,13 +354,16 @@
         const progressCard = [...document.querySelectorAll('.card.schedule')]
             .find((card) => /学习进度/.test(cleanText(card.querySelector('h5')?.textContent)));
         const localContainer = progressCard?.querySelector('#container');
-        if (!localContainer || !progress.container) return false;
-        // The platform draws this widget client-side. Its background HTML often
-        // contains an empty #container, which must never replace the live ring.
-        if (!progress.container.querySelector('svg, canvas, .progressbar-text')) return false;
-        // Replace only the circular progress widget. The persistent homepage and
-        // its course list stay untouched, so the active workflow cannot jump.
-        localContainer.innerHTML = progress.container.innerHTML;
+        if (!localContainer || progress.percent === null) return false;
+        const text = localContainer.querySelector('.progressbar-text');
+        const paths = [...localContainer.querySelectorAll('svg path')];
+        const path = paths[paths.length - 1];
+        if (!text || !path) return false;
+        const circumference = Number.parseFloat(path.style.strokeDasharray) || 307.919;
+        const percent = Math.max(0, Math.min(100, progress.percent));
+        path.style.strokeDasharray = `${circumference}, ${circumference}`;
+        path.style.strokeDashoffset = String(circumference * (1 - percent / 100));
+        text.textContent = `${Number(percent.toFixed(2))}%`;
         return true;
     }
 
@@ -432,6 +439,7 @@
                 const text = cleanText(container?.textContent);
                 const creditText = cleanText(container?.querySelector('td.sub_title')?.textContent || text);
                 return { node, container, title, completed: /获得\s*\d+(?:\.\d+)?\s*学分/.test(creditText) };
+
             });
     }
 
@@ -439,7 +447,6 @@
         debugLog('info', 'click-node', { text: cleanText(node.textContent), href: node.href || null });
         node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         setTimeout(() => node.click(), 250);
-
     }
 
     function selectNext(items, index, accepts) {
@@ -653,6 +660,7 @@
 			const scrollTop =
 				window.scrollY ||
 				document.documentElement.scrollTop ||
+
 				document.body.scrollTop ||
 				0;
 
@@ -660,7 +668,6 @@
 				window.innerHeight ||
 				document.documentElement.clientHeight ||
 				0;
-
 
 			const documentHeight =
 				Math.max(
@@ -874,6 +881,7 @@ if (modeButton) {
         if (autoStopButton) {
             const enabled = state.autoStopAt100 !== false;
             autoStopButton.textContent = enabled ? '100%自动停：开' : '100%自动停：关';
+
             autoStopButton.title = enabled ? '点击后：达到 100% 不自动停止' : '点击后：达到 100% 自动停止';
         }
         renderLog();
@@ -881,7 +889,6 @@ if (modeButton) {
 
     function renderLog() {
         if (!panel) return;
-
         const logNode = panel.querySelector('[data-role="log"]');
         if (!logNode || logNode.hidden) return;
         logNode.textContent = recentLogs().map((entry) => {
@@ -1002,5 +1009,4 @@ if (modeButton) {
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
-
 
