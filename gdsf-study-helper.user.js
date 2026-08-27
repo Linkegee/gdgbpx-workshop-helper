@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.26
+// @version      0.1.27
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.26';
+    const VERSION = '0.1.27';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -33,7 +33,7 @@
     const DIRECTORY_CONFIRM_DELAY_MS = 1000;
     const COMPLETION_TIMEOUT_MS = 90 * 60 * 1000;
     // This is a background request only: it never reloads or navigates the homepage.
-    const HOME_STATUS_REFRESH_MS = 30 * 1000;
+    const HOME_STATUS_REFRESH_MS = 5 * 1000;
     const OUTER_COURSE_SELECTOR = 'li[cl]';
     // Some categories expose the course title itself as the link, while others
     // use a separate “进入学习” button. Both forms must be discovered.
