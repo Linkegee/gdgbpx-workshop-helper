@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省国家工作人员学法考试平台学习助手
 // @namespace    https://xfks.gdsf.gov.cn/
-// @version      0.1.24
+// @version      0.1.25
 // @description  按课程目录顺序正常学习：滚动阅读、等待平台计时确认学分、确认目录状态后继续。
 // @author       User & Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.24';
+    const VERSION = '0.1.25';
     const STRICT_VERIFICATION_VERSION = 1;
     const STATE_KEY = 'gdsf_study_helper_state_v1';
     const LOG_KEY = 'gdsf_study_helper_logs_v1';
@@ -198,7 +198,6 @@
                 const remoteVersion = match?.[1] || '';
                 if (response.status >= 200 && response.status < 300 && remoteVersion && compareVersions(remoteVersion, VERSION) > 0) {
                     updateReady = true;
-
                     renderUpdate(`发现 v${remoteVersion}，点击“更新”安装。`, true);
                     debugLog('info', 'update-available', { installed: VERSION, remote: remoteVersion });
                 } else {
@@ -218,6 +217,7 @@
         debugLog('info', 'update-install-opened');
         GM_openInTab(UPDATE_URL, { active: true, insert: true, setParent: true });
     }
+
 
     function closeActiveCourseTab() {
         const tab = activeCourseTab;
@@ -351,6 +351,9 @@
             .find((card) => /学习进度/.test(cleanText(card.querySelector('h5')?.textContent)));
         const localContainer = progressCard?.querySelector('#container');
         if (!localContainer || !progress.container) return false;
+        // The platform draws this widget client-side. Its background HTML often
+        // contains an empty #container, which must never replace the live ring.
+        if (!progress.container.querySelector('svg, canvas, .progressbar-text')) return false;
         // Replace only the circular progress widget. The persistent homepage and
         // its course list stay untouched, so the active workflow cannot jump.
         localContainer.innerHTML = progress.container.innerHTML;
@@ -399,7 +402,6 @@
                 if (stopForCompletedHomeProgress(state, progress, 'background-sync')) {
                     return;
                 }
-
                 if (!Object.keys(snapshot).length) {
                     debugLog('warn', 'home-status-refresh-empty', { progress: progress.percent, progressWidgetUpdated });
                     return;
@@ -437,6 +439,7 @@
         debugLog('info', 'click-node', { text: cleanText(node.textContent), href: node.href || null });
         node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         setTimeout(() => node.click(), 250);
+
     }
 
     function selectNext(items, index, accepts) {
@@ -600,7 +603,6 @@
         } catch (error) {
             debugLog('error', 'course-tab-open-failed', { error, href: next.item.href });
             setState({ status: 'paused', message: '无法在新标签打开二级课程，请检查浏览器后继续。' });
-
         }
     }
 
@@ -658,6 +660,7 @@
 				window.innerHeight ||
 				document.documentElement.clientHeight ||
 				0;
+
 
 			const documentHeight =
 				Math.max(
@@ -801,7 +804,6 @@ const complete =
         });
     }
 
-
     function tick() {
         const state = getState();
         renderPanel(state);
@@ -879,6 +881,7 @@ if (modeButton) {
 
     function renderLog() {
         if (!panel) return;
+
         const logNode = panel.querySelector('[data-role="log"]');
         if (!logNode || logNode.hidden) return;
         logNode.textContent = recentLogs().map((entry) => {
@@ -999,6 +1002,5 @@ if (modeButton) {
     timer = window.setInterval(tick, TICK_MS);
     tick();
 })();
-
 
 
