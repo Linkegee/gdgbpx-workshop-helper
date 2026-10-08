@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.20
+// @version      1.5.21
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -30,13 +30,14 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.20';
+    const VERSION = '1.5.21';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
     const MAINTENANCE_PLAYER_GRACE_MS = 120000;
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
+    const PANEL_COLLAPSED_KEY = 'gdgbpx_workshop_helper_panel_collapsed_v1';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
     const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
@@ -736,7 +737,7 @@
 
     function installPanel(forceShow = false) {
         if (panel && document.contains(panel)) {
-            if (forceShow) panel.style.display = 'block';
+            if (forceShow) setPanelCollapsed(false);
             renderPanel(getState());
             return;
         }
@@ -753,6 +754,11 @@
             #gbpx-helper-panel .gbpx-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; cursor:move; touch-action:none; user-select:none; }
             #gbpx-helper-panel .gbpx-title { color:#a40000; font-weight:700; }
             #gbpx-helper-panel .gbpx-close { border:0; background:transparent; cursor:pointer; font-size:18px; }
+            #gbpx-helper-panel .gbpx-launcher { display:none; }
+            #gbpx-helper-panel.gbpx-collapsed { width:46px; height:46px; padding:0; border-radius:50%; overflow:hidden; }
+            #gbpx-helper-panel.gbpx-collapsed > :not(.gbpx-launcher) { display:none; }
+            #gbpx-helper-panel.gbpx-collapsed .gbpx-launcher { display:flex; align-items:center; justify-content:center; width:100%; height:100%; margin:0; padding:0; border:0; background:#b30000; color:white; font:bold 20px sans-serif; cursor:pointer; }
+            #gbpx-helper-panel .gbpx-launcher:focus-visible { outline:3px solid #f3b94b; outline-offset:-4px; }
             #gbpx-helper-panel .gbpx-status { padding:8px; margin:6px 0; background:#f7f7f7; border-radius:5px; word-break:break-all; }
             #gbpx-helper-panel .gbpx-update-notice { display:block; width:100%; margin:6px 0; padding:7px 8px; border:1px solid #d48b00; border-radius:5px; color:#7a4100; background:#fff5d6; cursor:pointer; font-weight:700; }
             #gbpx-helper-panel .gbpx-update-notice[hidden] { display:none; }
@@ -776,9 +782,10 @@
         panel = document.createElement('section');
         panel.id = 'gbpx-helper-panel';
         panel.innerHTML = `
+            <button class="gbpx-launcher" type="button" title="展开学习助手" aria-label="展开学习助手" aria-expanded="false">学</button>
             <div class="gbpx-head">
                 <span class="gbpx-title">专题学习助手 v${VERSION}</span>
-                <button class="gbpx-close" type="button" title="隐藏面板">×</button>
+                <button class="gbpx-close" type="button" title="收起为小图标" aria-label="收起学习助手" aria-expanded="true">−</button>
             </div>
             <div class="gbpx-status" data-role="status"></div>
             <button class="gbpx-update-notice" type="button" data-action="installupdate" hidden></button>
@@ -819,8 +826,9 @@
         enablePanelDragging();
 
         panel.querySelector('.gbpx-close').addEventListener('click', () => {
-            panel.style.display = 'none';
+            setPanelCollapsed(true, true);
         });
+        panel.querySelector('.gbpx-launcher').addEventListener('click', () => setPanelCollapsed(false, true));
         panel.addEventListener('click', (event) => {
             const button = event.target.closest('[data-action]');
             if (!button) return;
@@ -834,6 +842,27 @@
         });
 
         renderPanel(getState());
+        setPanelCollapsed(!forceShow && GM_getValue(PANEL_COLLAPSED_KEY, false) === true);
+    }
+
+    function setPanelCollapsed(collapsed, moveFocus = false) {
+        if (!panel) return;
+        panel.style.display = 'block';
+        const wasCollapsed = panel.classList.contains('gbpx-collapsed');
+        if (collapsed && !wasCollapsed) {
+            const rect = panel.getBoundingClientRect();
+            GM_setValue(PANEL_POSITION_KEY, { left: rect.left, top: rect.top });
+            panel.classList.add('gbpx-collapsed');
+            panel.style.left = `${Math.min(Math.max(0, rect.left), Math.max(0, window.innerWidth - 46))}px`;
+            panel.style.top = `${Math.min(Math.max(0, rect.bottom - 46), Math.max(0, window.innerHeight - 46))}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        } else if (!collapsed && wasCollapsed) {
+            panel.classList.remove('gbpx-collapsed');
+            restorePanelPosition();
+        }
+        GM_setValue(PANEL_COLLAPSED_KEY, collapsed);
+        if (moveFocus) panel.querySelector(collapsed ? '.gbpx-launcher' : '.gbpx-close').focus();
     }
 
     function restorePanelPosition() {
