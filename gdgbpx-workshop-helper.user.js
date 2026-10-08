@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.21
+// @version      1.5.22
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -30,7 +30,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.21';
+    const VERSION = '1.5.22';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
     const MAINTENANCE_PLAYER_GRACE_MS = 120000;
@@ -1781,7 +1781,8 @@
                 return false;
             }
             const tab = GM_openInTab(target.url, {
-                active: true,
+                // Automatic lesson handoffs must not select the new player tab.
+                active: false,
                 insert: true,
                 setParent: true
             });
@@ -1792,6 +1793,7 @@
                 resourceCode: target.resourceCode,
                 databaseCourseId: target.databaseCourseId,
                 trigger,
+                active: false,
                 hasCourseContext: true,
                 hasCloseHandle: Boolean(tab && typeof tab.close === 'function')
             });

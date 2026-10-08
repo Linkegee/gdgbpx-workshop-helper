@@ -14,6 +14,7 @@ source = source.replace(
         shouldRecoverPausedVideoImmediately,
         resolveCoursePlayerUrl,
         openLessonPlayer,
+        openPlayerFallbackTab,
         handleListPage,
         handleDetailPage,
         setFallbackPlayerTab(value) { fallbackPlayerTab = value; },
@@ -121,7 +122,12 @@ const primaryOpenMethod = helper.openLessonPlayer({
 assert.equal(primaryOpenMethod, 'managed-tab', 'the managed extension tab must be the primary open path');
 assert.equal(openedTabs.length, 1);
 assert.equal(new URL(openedTabs[0].url).searchParams.get('courseId'), 'player-resource-456');
-assert.equal(openedTabs[0].options.active, true);
+assert.equal(openedTabs[0].options.active, false, 'automatic course opening must not select the player tab');
+helper.setFallbackPlayerTab(null);
+assert.equal(helper.openPlayerFallbackTab(courseTitle, 'fallback'), true);
+assert.equal(openedTabs[1].options.active, false, 'fallback reopening must also stay in the background');
+assert.equal(openedTabs[1].options.setParent, true, 'preserve the existing parent relationship');
+helper.setFallbackPlayerTab(null);
 
 const emptyDetailPlayingState = {
     ...helper.defaultState(),
