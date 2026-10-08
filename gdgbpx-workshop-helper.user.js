@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.19
-// @description  用户手动启动后，依次处理“专题学习-在学”课程；支持暂停、继续、停止、跳过、静音和可靠的正常时长学习。
+// @version      1.5.20
+// @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
 // @updateURL    https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js
@@ -23,13 +23,17 @@
 // @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      raw.githubusercontent.com
+// @connect      gbpx.gd.gov.cn
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '1.5.19';
+    const VERSION = '1.5.20';
+    const MAINTENANCE_CHECK_MS = 30000;
+    const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
+    const MAINTENANCE_PLAYER_GRACE_MS = 120000;
     const STATE_KEY = 'gdgbpx_workshop_helper_state_v1';
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
@@ -116,6 +120,8 @@
     let playerIdentityVerified = false;
     let playerIdentityMismatchClosing = false;
     let playerStartedEventPublished = false;
+    let maintenanceRequest = null;
+    let maintenanceNavigationPending = false;
 
     function defaultState() {
         return {
@@ -146,6 +152,9 @@
             closingPlayerLastSeenAt: 0,
             closingPlayerUnloadAt: 0,
             serverCompletedLessonKeys: [],
+            maintenance: null,
+            retiredMaintenanceSessionId: '',
+            maintenanceResumeLessonKey: '',
             settings: {
                 playbackRate: 1,
                 muted: true,
@@ -912,7 +921,7 @@
 
         panel.querySelector('[data-action="pause"]').disabled = state.status !== 'running';
         panel.querySelector('[data-action="continue"]').disabled = state.status !== 'paused';
-        panel.querySelector('[data-action="skip"]').disabled = !state.currentLessonTitle || !['running', 'paused'].includes(state.status);
+        panel.querySelector('[data-action="skip"]').disabled = Boolean(state.maintenance) || !state.currentLessonTitle || !['running', 'paused'].includes(state.status);
         panel.querySelector('[data-action="stop"]').disabled = !['running', 'paused'].includes(state.status);
         updateLogCount();
         updateBridgeStatus();
@@ -943,6 +952,14 @@
             GM_openInTab(updateUrl, { active: true, insert: true, setParent: true });
             return;
         }
+        if (state.maintenance && ['start', 'continue', 'recheck'].includes(action)) {
+            updateState({ status: 'running', phase: 'maintenance-wait',
+                message: '继续检查系统开放状态，保留原课程',
+                maintenance: { ...state.maintenance, nextCheckAt: 0,
+                    playerClosed: state.maintenance.playerClosed || state.phase === 'maintenance-player-close' } });
+            scheduleMainTick();
+            return;
+        }
         if (action === 'start') {
             if (!isListRoute() && !isDetailRoute()) {
                 updateState({ message: '请先手动进入“专题学习 → 在学”页面' });
@@ -952,6 +969,7 @@
             const resetSkipped = freshRun || state.phase === 'all-unfinished-skipped';
             updateState({
                 status: 'running',
+                maintenance: freshRun ? null : state.maintenance,
                 phase: isListRoute() ? 'list-ready' : 'detail-ready',
                 message: '已启动，正在读取当前页面',
                 lastActionAt: 0,
@@ -977,7 +995,9 @@
         }
 
         if (action === 'pause') {
-            updateState({ status: 'paused', message: '已暂停；播放器会暂停，点击“继续”恢复' });
+            updateState({ status: 'paused', message: state.maintenance
+                ? '已暂停维护检查及自动恢复，点击“继续”恢复'
+                : '已暂停；播放器会暂停，点击“继续”恢复' });
             return;
         }
         if (action === 'continue') {
@@ -1013,11 +1033,12 @@
         }
         if (action === 'stop') {
             updateState({
-                status: 'stopped', phase: 'stopped', message: '已停止', stopRequestAt: Date.now()
+                status: 'stopped', phase: 'stopped', message: '已停止', stopRequestAt: Date.now(), maintenance: null
             });
             return;
         }
         if (action === 'skip') {
+            if (state.maintenance) return;
             if (!state.currentLessonKey) return;
             updateState({
                 status: 'running',
@@ -1056,6 +1077,11 @@
 
     function mainTick() {
         renderPanel(getState());
+        if (handleMaintenance()) {
+            clearTimeout(mainTickTimer);
+            if (getState().status === 'running') mainTickTimer = setTimeout(mainTick, TICK_MS);
+            return;
+        }
         const state = getState();
         syncServerStatusMonitor(state);
         if (state.status !== 'running') return;
@@ -1075,6 +1101,178 @@
         }
         clearTimeout(mainTickTimer);
         mainTickTimer = setTimeout(mainTick, TICK_MS);
+    }
+
+    function maintenanceNotice(root = document) {
+        // Inspect the site's notice, never our own status panel/logs. A normal
+        // course or announcement mentioning maintenance is not a shutdown page.
+        const notice = normalizeText(root.querySelector('.notice-main')?.textContent);
+        if (notice && /维护公告|系统维护|系统调试/.test(notice)
+            && /系统关闭|暂停|维护|调试/.test(notice)) return notice.slice(0, 500);
+        if (!/维护公告|系统维护|系统调试/.test(root.title || '')) return '';
+        const text = normalizeText([...root.body?.children || []]
+            .filter((node) => node.id !== 'gbpx-helper-panel' && !['SCRIPT', 'STYLE', 'IFRAME'].includes(node.tagName))
+            .map((node) => node.textContent).join(' '));
+        return /系统关闭|暂停服务|暂停开放|维护中|系统维护|系统调试/.test(text) ? text.slice(0, 500) : '';
+    }
+
+    function maintenanceTarget(state = getState()) {
+        const target = new URL('/gdceportal/dist/', `https://${MAIN_HOST}`);
+        target.hash = state.maintenance?.returnHash
+            || (state.currentClassId
+                ? `#/workshop/workshopindex/mergeClass?classId=${encodeURIComponent(state.currentClassId)}&type=1`
+                : '#/workshop/workshopindex/classList?classType=3');
+        target.searchParams.set('_gbpx_recovery', String(Date.now()));
+        return target.href;
+    }
+
+    function enterMaintenance(notice, source) {
+        const state = getState();
+        if (state.status !== 'running' || state.maintenance) return;
+        const now = Date.now();
+        const heartbeat = getPlayerHeartbeat();
+        const matchingPlayer = heartbeat?.lessonKey === state.currentLessonKey
+            && now - Number(heartbeat.at || 0) < MAINTENANCE_PLAYER_GRACE_MS;
+        clearTimeout(detailRefreshTimer);
+        detailRefreshTimer = null;
+        stopServerStatusMonitor('maintenance');
+        updateState({
+            phase: 'maintenance-wait',
+            message: '检测到系统维护；已保存当前课程，每 30 秒检查开放状态，可暂停或停止',
+            // Existing v1.5.19 player tabs also understand this close request.
+            // It stops playback without marking the interrupted lesson complete.
+            stopRequestAt: now,
+            maintenance: {
+                id: `${now}-${Math.random().toString(36).slice(2)}`, since: now,
+                notice, nextCheckAt: 0, attempts: 0, reloadAt: 0,
+                returnHash: isDetailRoute() || isListRoute() ? location.hash : '',
+                playerSessionId: matchingPlayer ? heartbeat.sessionId : '',
+                playerCloseRequired: Boolean(matchingPlayer || fallbackPlayerTab),
+                playerUnloadAt: 0, playerClosed: Boolean(fallbackPlayerTab?.closed)
+            }
+        });
+        if (fallbackPlayerTab) {
+            const id = getState().maintenance.id;
+            fallbackPlayerTab.onclose = () => {
+                const latest = getState();
+                if (latest.maintenance?.id === id) {
+                    updateState({ maintenance: { ...latest.maintenance, playerClosed: true } });
+                    scheduleMainTick();
+                }
+            };
+            try { fallbackPlayerTab.close(); }
+            catch (error) { debugLog('warn', 'maintenance-player-close-failed', { error }); }
+        }
+        debugLog('warn', 'maintenance-detected', { source, notice });
+        scheduleMainTick();
+    }
+
+    function probeMaintenance() {
+        const state = getState();
+        if (state.status !== 'running' || !state.maintenance || maintenanceRequest
+            || Date.now() < state.maintenance.nextCheckAt) return;
+        const id = state.maintenance.id;
+        maintenanceRequest = id;
+        updateState({ maintenance: { ...state.maintenance,
+            nextCheckAt: Date.now() + MAINTENANCE_CHECK_MS,
+            attempts: state.maintenance.attempts + 1 } });
+        const finish = (response, failure = '') => {
+            if (maintenanceRequest === id) maintenanceRequest = null;
+            const latest = getState();
+            // A response arriving after Pause/Stop/new run cannot navigate.
+            if (latest.status !== 'running' || latest.maintenance?.id !== id) return;
+            let available = false;
+            if (!failure && response.status === 200) {
+                const finalUrl = new URL(response.finalUrl || maintenanceTarget(latest));
+                if (finalUrl.origin === `https://${MAIN_HOST}`) {
+                    const root = new DOMParser().parseFromString(response.responseText || '', 'text/html');
+                    available = !maintenanceNotice(root)
+                        && Boolean((root.querySelector('#app') && root.querySelector('script[src]'))
+                            || root.querySelector('input[type="password"]'));
+                }
+            }
+            debugLog('info', 'maintenance-probe-result', {
+                attempt: latest.maintenance.attempts, status: response?.status || 0, failure, available
+            });
+            if (available) {
+                updateState({ phase: 'maintenance-recovering',
+                    message: '网站已返回正常入口，刷新后核验登录与课程进度',
+                    maintenance: { ...latest.maintenance, reloadAt: Date.now() } });
+                maintenanceNavigationPending = true;
+                location.replace(maintenanceTarget());
+            }
+        };
+        try {
+            GM_xmlhttpRequest({ method: 'GET', url: maintenanceTarget(state).split('#')[0],
+                timeout: MAINTENANCE_REQUEST_TIMEOUT_MS, nocache: true,
+                onload: (response) => finish(response),
+                onerror: () => finish(null, 'network-error'),
+                ontimeout: () => finish(null, 'timeout'),
+                onabort: () => finish(null, 'aborted') });
+        } catch (error) {
+            finish(null, String(error));
+        }
+    }
+
+    function handleMaintenance() {
+        let state = getState();
+        const notice = maintenanceNotice();
+        if (notice && !state.maintenance) {
+            enterMaintenance(notice, 'visible-page');
+            state = getState();
+        }
+        if (!state.maintenance) return Boolean(notice);
+        stopServerStatusMonitor('maintenance');
+        if (state.status !== 'running') return true;
+        if (maintenanceNavigationPending) return true;
+        if (notice) { probeMaintenance(); return true; }
+
+        if (document.querySelector('input[type="password"]')) {
+            updateState({ status: 'paused', phase: 'maintenance-login',
+                message: '系统已开放，但登录已失效；请登录后点击“继续”恢复原课程' });
+            return true;
+        }
+        if (!state.maintenance.reloadAt) { probeMaintenance(); return true; }
+        // A successful HTTP response or disappearance of the notice is not
+        // proof that Vue/auth/course data are ready. Require real page content.
+        const detailReady = isDetailRoute() && readLessons().length > 0;
+        const listReady = isListRoute() && Boolean(document.querySelector('.content-div .list_box'));
+        if (!detailReady && !listReady) {
+            // Give a newly navigated Vue application time to finish loading.
+            if (!state.maintenance.reloadAt || Date.now() - state.maintenance.reloadAt >= MAINTENANCE_CHECK_MS) {
+                probeMaintenance();
+            }
+            return true;
+        }
+        if (state.currentClassId && currentClassId() !== state.currentClassId) {
+            location.hash = `#/workshop/workshopindex/mergeClass?classId=${encodeURIComponent(state.currentClassId)}&type=1`;
+            return true;
+        }
+        const recovery = state.maintenance;
+        const heartbeat = getPlayerHeartbeat();
+        const playerSilent = heartbeat?.sessionId !== recovery.playerSessionId
+            || Date.now() - Number(heartbeat.at || 0) >= PLAYER_CLOSE_HEARTBEAT_SILENCE_MS;
+        if (recovery.playerCloseRequired && !recovery.playerClosed
+            && !(recovery.playerSessionId && recovery.playerUnloadAt && playerSilent)) {
+            if (Date.now() - recovery.since >= MAINTENANCE_PLAYER_GRACE_MS) {
+                updateState({ status: 'paused', phase: 'maintenance-player-close',
+                    message: '系统已开放，但旧播放器未确认关闭；请关闭旧播放器后点击“继续”' });
+            }
+            return true;
+        }
+        fallbackPlayerTab = null;
+        managedPlayerCloseRequestedAt = 0;
+        updateState({ maintenance: null, retiredMaintenanceSessionId: recovery.playerSessionId || '',
+            maintenanceResumeLessonKey: state.currentLessonKey,
+            phase: detailReady ? 'detail-ready' : 'list-ready',
+            message: '系统维护结束，已重新读取课程，继续未完成的学习',
+            stopRequestAt: 0, skipRequestAt: 0, completedCloseRequestAt: 0,
+            completedCloseAttempts: 0, completedCloseStartedAt: 0,
+            closingPlayerSessionId: '', closingPlayerLastSeenAt: 0, closingPlayerUnloadAt: 0,
+            refreshAttempts: 0, openAttempts: 0, fallbackOpenAttempted: false, lastActionAt: 0 });
+        debugLog('info', 'maintenance-recovered', { durationMs: Date.now() - recovery.since,
+            attempts: recovery.attempts, lessonKey: state.currentLessonKey });
+        return false;
     }
 
     function handleListPage(state) {
@@ -1387,6 +1585,11 @@
         if (!serverStatusFrame || !serverStatusFrame.contentDocument) return;
         const state = getState();
         if (!serverStatusProbeIsActive(state)) return;
+        const notice = maintenanceNotice(serverStatusFrame.contentDocument);
+        if (notice) {
+            enterMaintenance(notice, 'server-status-probe');
+            return;
+        }
         const lessons = readLessons(serverStatusFrame.contentDocument);
         if (!lessons.length) {
             if (Date.now() - serverStatusProbeStartedAt > SERVER_STATUS_PROBE_TIMEOUT_MS) {
@@ -1939,10 +2142,12 @@
             return;
         }
 
-        const nextLesson = unfinished.find((lesson) => {
+        const eligible = unfinished.filter((lesson) => {
             const key = lessonKey(classId, lesson.title);
             return !state.skippedLessonKeys.includes(key) && !serverCompletedLessonKeys.includes(key);
         });
+        const nextLesson = eligible.find((lesson) => lessonKey(classId, lesson.title) === state.maintenanceResumeLessonKey)
+            || eligible[0];
         if (!nextLesson) {
             debugLog('warn', 'lesson-selection-no-candidate', {
                 classId,
@@ -1962,6 +2167,7 @@
         const sameLesson = state.currentLessonKey === key;
         updateState({
             phase: 'opening-video',
+            maintenanceResumeLessonKey: '',
             message: `打开必修 ${nextLesson.index + 1}/${lessons.length}`,
             currentLessonTitle: nextLesson.title,
             currentLessonKey: key,
@@ -2021,6 +2227,15 @@
         if (!event || !event.id || event.id === lastHandledEventId) return;
         lastHandledEventId = event.id;
         const state = getState();
+        if (state.maintenance) {
+            if (event.type === 'player-unloading'
+                && event.playerSessionId === state.maintenance.playerSessionId
+                && event.at >= state.maintenance.since) {
+                updateState({ maintenance: { ...state.maintenance, playerUnloadAt: event.at } });
+            }
+            return;
+        }
+        if (event.playerSessionId && event.playerSessionId === state.retiredMaintenanceSessionId) return;
         debugLog('info', 'player-event-received', { event, status: state.status, phase: state.phase });
 
         const completedEventLesson = Boolean(event.lessonKey)
@@ -2437,6 +2652,11 @@
 
         if (handlePlayerCloseRequest(state)) return;
 
+        if (state.maintenance) {
+            applyPlayerState(state);
+            return;
+        }
+
         if (!playerVideo) return;
         applyPlayerState(state);
         recoverIncompleteEndPosition(playerVideo, state);
@@ -2617,6 +2837,7 @@
         return Boolean(video
             && state?.status === 'running'
             && state?.settings?.autoResume
+            && !state.maintenance
             && !video.ended
             && !blockingQuestion
             && !state.stopRequestAt
@@ -2651,7 +2872,7 @@
 
     function attemptPlayerStart(video) {
         const state = getState();
-        if (state.status !== 'running' || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
+        if (state.status !== 'running' || state.maintenance || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
         const source = video.currentSrc || video.getAttribute('src') || '';
         const durationReady = Number.isFinite(video.duration) && video.duration > 0;
         const metadataReady = video.readyState >= 1 && durationReady;
@@ -2697,7 +2918,7 @@
         }
         playerVideo.playbackRate = 1;
 
-        if (state.status === 'paused' || ['stopped', 'idle', 'complete'].includes(state.status)) {
+        if (state.maintenance || state.status === 'paused' || ['stopped', 'idle', 'complete'].includes(state.status)) {
             if (!playerVideo.paused) playerVideo.pause();
         }
     }
