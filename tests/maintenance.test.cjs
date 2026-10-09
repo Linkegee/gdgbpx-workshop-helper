@@ -481,3 +481,14 @@ test('delayed close cannot act after pause or a different lesson replaces the ol
         assert.equal(h.api.shouldRecoverPausedVideoImmediately({paused:true},h.api.getState(),false),false);
     }
 });
+
+
+test('player frame uses granted sandbox close even when native top.close silently refuses',()=>{
+    const h=boot({...active,completedCloseRequestAt:1800000000000});h.api.setIdentity();
+    let privileged=0,native=0;
+    h.context.top={document:h.context.document,close(){native++;}};
+    h.context.close=()=>privileged++;
+    h.api.handlePlayerCloseRequest();
+    assert.equal(privileged,1);
+    assert.equal(native,0);
+});

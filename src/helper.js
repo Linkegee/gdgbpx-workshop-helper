@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.31';
+    const VERSION = '1.5.32';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -429,7 +429,7 @@
             const logs = compactStoredLogs([...getLogs(), entry]);
             GM_setValue(LOG_KEY, logs);
             if (level === 'error' || event === 'account-invalidated'
-                || (event === 'state-change' && detail?.from?.phase !== detail?.to?.phase && ['account-context-changed','player-open-failed','login-required','identity-entry-failed'].includes(detail?.to?.phase))) {
+                || (event === 'state-change' && detail?.from?.phase !== detail?.to?.phase && ['account-context-changed','player-open-failed','completed-close-failed','login-required','identity-entry-failed'].includes(detail?.to?.phase))) {
                 GM_setValue(FAILURE_KEY, {time:entry.time,event,documentTag:diagnosticDocumentTag,
                     snapshot:diagnosticSnapshot(),recentLogs:logs.slice(-30)});
             }
@@ -3197,7 +3197,9 @@
                 || handledCloseRequestAt !== requestAt
                 || (latest.status !== 'running' && reason !== 'stop-request')) return;
             debugLog('warn', 'player-window-close-fallback', {reason});
-            try { window.top.close(); } catch (_) { try { window.close(); } catch (_) {} }
+            // Use Tampermonkey's granted close, not the native top window method.
+            try { window.close(); }
+            catch (error) { debugLog('error','player-granted-close-failed',{error}); }
         };
         // A visible site button can silently do nothing. Keep a guarded fallback.
         setTimeout(fallback, 1500);
