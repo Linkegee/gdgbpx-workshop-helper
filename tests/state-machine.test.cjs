@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const scriptPath = require('node:path').join(__dirname, '..', 'gdgbpx-workshop-helper.user.js');
-let source = fs.readFileSync(scriptPath, 'utf8');
+let source = require('./load-core.cjs').loadCore();
 source = source.replace(
     '    installGlobalErrorLogging();',
     `    globalThis.__helperTest = {
@@ -39,6 +39,7 @@ const documentStub = {
     addEventListener() {}
 };
 const context = {
+    accountRuntime: require('./load-core.cjs').runtimeStub,
     console,
     setTimeout,
     clearTimeout,

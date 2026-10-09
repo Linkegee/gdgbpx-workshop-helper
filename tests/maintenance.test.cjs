@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'gdgbpx-workshop-helper.user.js'), 'utf8');
+const source = require('./load-core.cjs').loadCore();
 const STATE = 'gdgbpx_workshop_helper_state_v1';
 const HEARTBEAT = 'gdgbpx_workshop_helper_player_heartbeat_v1';
 const notice = '9月24日-27日，9月30日-10月7日晚上21:00至次日8:00系统关闭，造成不便敬请谅解';
@@ -39,7 +39,8 @@ function boot(saved, values = new Map()) {
     const requests = [];
     const navigations = [];
     const context = {
-        console: { log() {}, warn() {}, error() {} }, URL, URLSearchParams, Blob, Map, Set,
+        accountRuntime: require('./load-core.cjs').runtimeStub,
+        console: process.env.DEBUG_TESTS ? console : { log() {}, warn() {}, error() {} }, URL, URLSearchParams, Blob, Map, Set,
         Date: class extends Date { static now() { return now; } },
         setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
         clearTimeout(id) { timers.delete(id); },
@@ -77,6 +78,29 @@ function boot(saved, values = new Map()) {
 
 const active = { status: 'running', phase: 'watching-video', currentClassId: 'class-1',
     currentLessonTitle: '测试课程', currentLessonKey: 'class-1::测试课程', currentLessonProgress: 83.13 };
+
+test('background player with a matching live heartbeat gets a bounded loading grace, without duplicate tabs', () => {
+    const h=boot({...active,phase:'opening-video',fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+    readyDetail(h);
+    h.advance(52000);
+    h.values.set(HEARTBEAT,{lessonKey:active.currentLessonKey,sessionId:'loading-player',at:h.now()});
+    h.api.handleDetailPage(h.api.getState());
+    assert.equal(h.api.getState().status,'running');assert.equal(h.opened.length,0);
+    h.advance(249000);
+    h.values.set(HEARTBEAT,{lessonKey:active.currentLessonKey,sessionId:'loading-player',at:h.now()});
+    h.api.handleDetailPage(h.api.getState());
+    assert.equal(h.api.getState().phase,'player-open-failed');assert.equal(h.api.getState().status,'paused');
+    assert.equal(h.opened.length,0);
+});
+
+test('another course heartbeat cannot extend loading or resume a manually paused account', () => {
+    const h=boot({...active,phase:'opening-video',fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+    readyDetail(h);h.advance(52000);
+    h.values.set(HEARTBEAT,{lessonKey:'other-course',at:h.now()});
+    h.api.handleDetailPage(h.api.getState());
+    assert.equal(h.api.getState().status,'paused');
+    h.api.mainTick();assert.equal(h.api.getState().status,'paused');
+});
 
 test('real maintenance page must leave watching-video and retain the interrupted lesson', () => {
     const h = boot(active);

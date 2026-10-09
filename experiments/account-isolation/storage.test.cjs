@@ -4,8 +4,8 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { createAccountStorage } = require('./storage.cjs');
-const source = fs.readFileSync(path.join(__dirname, '../../gdgbpx-workshop-helper.user.js'), 'utf8');
+const { createAccountStorage } = require('../../src/account-storage.cjs');
+const source = require('../../tests/load-core.cjs').loadCore();
 const STATE = 'gdgbpx_workshop_helper_state_v1';
 const EVENT = 'gdgbpx_workshop_helper_event_v1';
 const HEARTBEAT = 'gdgbpx_workshop_helper_player_heartbeat_v1';
@@ -26,6 +26,7 @@ function backend() {
 }
 function script(storage) {
     const context = { ...storage, URL, URLSearchParams,
+        accountRuntime: require('../../tests/load-core.cjs').runtimeStub,
         location: { hostname: 'gbpx.gd.gov.cn', href: 'https://gbpx.gd.gov.cn/gdceportal/dist/' },
         console: { log() {}, warn() {}, error(error) { throw error; } },
         setTimeout() { return 1; }, clearTimeout() {},

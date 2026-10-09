@@ -1,0 +1,31 @@
+// ==UserScript==
+// @name         广东省干部培训网络学院专题学习助手
+// @namespace    https://gbpx.gd.gov.cn/
+// @version      1.5.23
+// @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
+// @author       User & Codex
+// @license      MIT
+// @updateURL    https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js
+// @match        https://gbpx.gd.gov.cn/gdceportal/dist/*
+// @match        https://wcs1.shawcoder.xyz/gdcecw/*
+// @match        https://cs1.gdgbpx.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @grant        unsafeWindow
+// @connect      127.0.0.1
+// @connect      raw.githubusercontent.com
+// @connect      gbpx.gd.gov.cn
+// @grant        GM_getTab
+// @grant        GM_saveTab
+// @match        https://gbpx.gd.gov.cn/gdceportal/index.aspx*
+// @run-at       document-start
+// ==/UserScript==

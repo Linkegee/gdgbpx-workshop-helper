@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 let mode = 'maintenance';
-const helper = fs.readFileSync(path.join(__dirname, '..', 'gdgbpx-workshop-helper.user.js'), 'utf8')
+const helper = 'const accountRuntime={id:"fixture",label:"fixture",guard:()=>true,playerUrl:url=>url,bridgeEnabled:false};\n' + require('./load-core.cjs').loadCore()
     .replace("const MAIN_HOST = 'gbpx.gd.gov.cn';", "const MAIN_HOST = '127.0.0.1';")
     .replaceAll('`https://${MAIN_HOST}`', 'location.origin');
 
