@@ -71,13 +71,14 @@ test('launch tickets bind a player and its iframe, survive expiry on reload, rej
 });
 test('upgrade migrates only preferences; never starts or copies old course progress into any account',()=>{
     const f=fixture(),old={status:'running',phase:'watching-video',currentLessonProgress:80,currentLessonKey:'old-course',
-        maintenance:{id:'old-maintenance'},settings:{muted:false,playbackRate:2,autoResume:false,stallMinutes:5}};
+        maintenance:{id:'old-maintenance'},settings:{muted:false,playbackRate:2,autoResume:false,stallMinutes:2}};
     f.api.GM_setValue(STATE,old);
     for(let i=0;i<4;i++) {
         const storage=createAccountStorage(f.api,randomUUID());migratePreferences(f.api,storage);
         const state=storage.GM_getValue(STATE);
         assert.equal(state.status,'idle');assert.equal(state.currentLessonKey,undefined);
         assert.equal(state.maintenance,undefined);assert.equal(state.settings.muted,false);
+        assert.equal(state.settings.stallMinutes,2);
         assert.equal(state.settings.playbackRate,undefined);
         storage.GM_setValue(STATE,{status:'paused'});migratePreferences(f.api,storage);
         assert.equal(storage.GM_getValue(STATE).status,'paused');

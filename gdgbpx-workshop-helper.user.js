@@ -202,7 +202,7 @@ function migratePreferences(api, storage) {
     for (const name of ['muted','autoResume','closeOnStall']) {
         if (typeof old?.settings?.[name] === 'boolean') settings[name] = old.settings[name];
     }
-    if ([1,3,5,10].includes(old?.settings?.stallMinutes)) settings.stallMinutes = old.settings.stallMinutes;
+    if ([2,3,5].includes(old?.settings?.stallMinutes)) settings.stallMinutes = old.settings.stallMinutes;
     if (!storage.GM_getValue(STATE_NAME,null)) storage.GM_setValue(STATE_NAME, {
         status:'idle',phase:'idle',settings,
         message:'会话隔离已就绪；点击开始后读取网站进度'
