@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.23
+// @version      1.5.24
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -29,6 +29,7 @@
 // @match        https://gbpx.gd.gov.cn/gdceportal/index.aspx*
 // @run-at       document-start
 // ==/UserScript==
+
 
 (async function(native) {
     'use strict';
@@ -285,7 +286,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.23';
+    const VERSION = '1.5.24';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
     const MAINTENANCE_PLAYER_GRACE_MS = 120000;
@@ -299,7 +300,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
     const PLAYER_HEARTBEAT_KEY = 'gdgbpx_workshop_helper_player_heartbeat_v1';
     const PLAYER_IDENTITY_SESSION_KEY = 'gdgbpxPlayerIdentityV1:' + accountRuntime.id;
     const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js';
-    const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+    let updateCheckPending = false;
+    let updateCheckMessage = '';
+    let lastUpdateAttemptAt = 0;
     const LIST_SECTION_KEY = 'gdgbpx_workshop_helper_list_section_v1';
     const LIST_SECTION_TTL_MS = 30 * 60 * 1000;
     const MAX_LOG_ENTRIES = 600;
@@ -560,9 +564,14 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function checkForScriptUpdate(force = false) {
         const now = Date.now();
+        if (updateCheckPending) return;
         const lastCheckAt = Number(GM_getValue(UPDATE_CHECK_KEY, 0) || 0);
-        if (!force && now - lastCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
-        GM_setValue(UPDATE_CHECK_KEY, now);
+        if (!force && now >= lastCheckAt && now - lastCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
+        if (!force && lastUpdateAttemptAt && now >= lastUpdateAttemptAt && now - lastUpdateAttemptAt < 60000) return;
+        lastUpdateAttemptAt = now;
+        updateCheckPending = true;
+        updateCheckMessage = '正在检查更新…';
+        renderPanel(getState());
         debugLog('info', 'script-update-check-started', { force, currentVersion: VERSION });
         new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -585,27 +594,31 @@ function createSessionRequest(native,page,runtime,location,timers) {
             const match = source.match(/^\/\/\s*@version\s+([^\s]+)\s*$/m);
             if (!match) throw new Error('远程脚本缺少 @version');
             const remoteVersion = match[1];
+            GM_setValue(UPDATE_CHECK_KEY, Date.now());
+            updateCheckPending = false;
             if (isNewerVersion(remoteVersion)) {
                 const available = { version: remoteVersion, url: UPDATE_URL, checkedAt: Date.now() };
                 GM_setValue(UPDATE_AVAILABLE_KEY, available);
+                updateCheckMessage = `发现新版 ${remoteVersion}`;
                 debugLog('info', 'script-update-available', {
                     currentVersion: VERSION,
                     remoteVersion
                 });
                 renderPanel(getState());
-                if (force) window.alert(`发现新版本 ${remoteVersion}，请点击助手面板中的“安装更新”。`);
                 return;
             }
             GM_deleteValue(UPDATE_AVAILABLE_KEY);
+            updateCheckMessage = `已检查：当前 v${VERSION} 已是最新版本`;
             debugLog('info', 'script-update-current', {
                 currentVersion: VERSION,
                 remoteVersion
             });
             renderPanel(getState());
-            if (force) window.alert(`当前已是最新版本 ${VERSION}。`);
         }).catch((error) => {
+            updateCheckPending = false;
+            updateCheckMessage = '检查更新失败，稍后自动重试，也可点击“检查更新”';
             debugLog('warn', 'script-update-check-failed', { force, error });
-            if (force) window.alert(`检查更新失败：${error.message || error}`);
+            renderPanel(getState());
         });
     }
 
@@ -975,6 +988,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         window.addEventListener('hashchange', scheduleMainTick);
         window.addEventListener('gbpx-account-ready', scheduleMainTick);
         window.addEventListener('focus', () => {
+            checkForScriptUpdate(false);
             const state = getState();
             if (state.status === 'running' && ['opening-video', 'watching-video'].includes(state.phase)) {
                 updateState({ message: '主页面已获得焦点；播放器状态仍以对应会话心跳为准' });
@@ -985,7 +999,13 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const observer = new MutationObserver(scheduleMainTick);
         observer.observe(document.documentElement, { childList: true, subtree: true });
         scheduleMainTick();
-        setTimeout(() => checkForScriptUpdate(false), 3000);
+        setTimeout(() => {
+            checkForScriptUpdate(false);
+            setInterval(() => checkForScriptUpdate(false), 60000);
+        }, 3000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) checkForScriptUpdate(false);
+        });
         debugLog('info', 'server-progress-monitor-mode', {
             mode: 'hidden-same-origin-iframe',
             intervalMs: SERVER_STATUS_PROBE_INTERVAL_MS,
@@ -1047,6 +1067,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
             </div>
             <div class="gbpx-status" data-role="status"></div>
             <button class="gbpx-update-notice" type="button" data-action="installupdate" hidden></button>
+            <div class="gbpx-meta" data-role="update-status"></div>
+            <button type="button" data-action="checkupdate">检查更新</button>
             <div class="gbpx-meta" data-role="workshop"></div>
             <div class="gbpx-meta" data-role="lesson"></div>
             <div class="gbpx-buttons">
@@ -1194,6 +1216,11 @@ function createSessionRequest(native,page,runtime,location,timers) {
         updateNotice.textContent = availableUpdate
             ? `发现新版本 ${availableUpdate.version}，点击安装更新`
             : '';
+        panel.querySelector('[data-action="checkupdate"]').disabled = updateCheckPending;
+        panel.querySelector('[data-role="update-status"]').textContent = updateCheckMessage;
+        const launcher = panel.querySelector('.gbpx-launcher');
+        launcher.textContent = availableUpdate ? '新' : '学';
+        launcher.title = availableUpdate ? `发现新版 ${availableUpdate.version}，展开后更新` : '展开学习助手';
         panel.querySelector('[data-role="workshop"]').textContent = state.currentWorkshopTitle
             ? `专题：${state.currentWorkshopTitle}`
             : `页面：${isListRoute() ? '在学列表' : isDetailRoute() ? '专题详情' : '其他页面'}`;
@@ -1215,6 +1242,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function handlePanelAction(action) {
+        if (action === 'checkupdate') { checkForScriptUpdate(true); return; }
         if (['start','continue','skip','recheck'].includes(action) && !accountRuntime.guard()) {
             renderPanel(getState());
             return;
