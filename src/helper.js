@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.28';
+    const VERSION = '1.5.29';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -10,6 +10,8 @@
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const PANEL_COLLAPSED_KEY = 'gdgbpx_workshop_helper_panel_collapsed_v1';
+    const FAILURE_KEY = 'gdgbpx_last_failure_v2';
+    const diagnosticDocumentTag = typeof bootstrapDocumentTag === 'string' ? bootstrapDocumentTag : 'unavailable';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
     const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
@@ -252,7 +254,7 @@
 
     function sanitizedUrl() {
         return location.href
-            .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
+            .replace(/([?&#](?:t|token|access_token|authorization|course_auth|gbpx_launch|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
             .slice(0, 500);
     }
 
@@ -350,19 +352,19 @@
         if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
         if (typeof value === 'string') {
             const scrubbed = value
-                .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
+                .replace(/([?&#](?:t|token|access_token|authorization|course_auth|gbpx_launch|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
                 .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
                 .replace(/(cookie\s*[:=]\s*)[^\r\n,}]+/gi, '$1[redacted]');
             return scrubbed.length > 1000 ? `${scrubbed.slice(0, 1000)}…` : scrubbed;
         }
         if (value instanceof Error) {
-            return { name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 3000) };
+            return sanitizeLogValue({ name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 3000) }, depth);
         }
         if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeLogValue(item, depth + 1));
         if (typeof value === 'object') {
             const result = {};
             for (const [key, item] of Object.entries(value).slice(0, 50)) {
-                if (/token|cookie|authorization|password|secret|session/i.test(key)) {
+                if (/token|cookie|authorization|course_auth|gbpx_launch|password|secret|session|^uid$/i.test(key)) {
                     result[key] = '[redacted]';
                 } else {
                     result[key] = sanitizeLogValue(item, depth + 1);
@@ -414,6 +416,8 @@
                 time: new Date().toISOString(),
                 level,
                 context: contextName(),
+                accountScope: accountRuntime.id,
+                documentTag: diagnosticDocumentTag,
                 event,
                 url: sanitizedUrl(),
                 detail: sanitizeLogValue(detail)
@@ -421,6 +425,11 @@
             if (suppressedRepeats) entry.detail.suppressedRepeats = suppressedRepeats;
             const logs = compactStoredLogs([...getLogs(), entry]);
             GM_setValue(LOG_KEY, logs);
+            if (level === 'error' || event === 'account-invalidated'
+                || (event === 'state-change' && detail?.from?.phase !== detail?.to?.phase && ['account-context-changed','player-open-failed','login-required','identity-entry-failed'].includes(detail?.to?.phase))) {
+                GM_setValue(FAILURE_KEY, {time:entry.time,event,documentTag:diagnosticDocumentTag,
+                    snapshot:diagnosticSnapshot(),recentLogs:logs.slice(-30)});
+            }
             const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
             console[method]('[GBP助手]', event, entry.detail);
             queueBridgeLog(entry);
@@ -477,16 +486,43 @@
         });
     }
 
+    function diagnosticSnapshot() {
+        const state = getState(), heartbeat = getPlayerHeartbeat();
+        let video = null;
+        try {
+            const element = playerVideo || document.querySelector('video');
+            if (element) video = {paused:element.paused,ended:element.ended,
+                currentTime:element.currentTime,duration:Number.isFinite(element.duration)?element.duration:null,
+                readyState:element.readyState,networkState:element.networkState,errorCode:element.error?.code || null};
+        } catch (_) {}
+        return {
+            runtime:sanitizeLogValue(accountRuntime.diagnostics?.() || {accountScope:accountRuntime.id}),
+            state:sanitizeLogValue(state),
+            page:{context:contextName(),url:sanitizedUrl(),topLevel:window.top===window,
+                visibility:document.visibilityState || 'unknown',readyState:document.readyState,
+                online:typeof navigator==='undefined'?null:navigator.onLine},
+            heartbeat:heartbeat?{ageMs:Math.max(0,Date.now()-Number(heartbeat.at || 0)),
+                matchesCurrentLesson:heartbeat.lessonKey===state.currentLessonKey,
+                currentTime:heartbeat.currentTime,duration:heartbeat.duration,paused:heartbeat.paused}:null,
+            video
+        };
+    }
+
     function diagnosticBundle() {
         const state = getState();
         return {
+            schemaVersion: 2,
+            accountScope: accountRuntime.id,
+            documentTag: diagnosticDocumentTag,
             generatedAt: new Date().toISOString(),
             scriptVersion: VERSION,
             userAgent: navigator.userAgent,
             url: sanitizedUrl(),
             context: contextName(),
             state: sanitizeLogValue(state),
-            logs: getLogs()
+            snapshot: diagnosticSnapshot(),
+            lastFailure: GM_getValue(FAILURE_KEY,null),
+            logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
     }
 
@@ -498,14 +534,14 @@
         const text = diagnosticText();
         GM_setClipboard(text, 'text');
         debugLog('info', 'logs-copied', { entries: getLogs().length });
-        updateState({ message: `已复制 ${getLogs().length} 条诊断日志` });
+        // Export must not replace the failure message or mutate the task state.
     }
 
     function downloadLogs() {
         const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `gdgbpx-helper-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        link.download = `gdgbpx-helper-log-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -515,8 +551,9 @@
 
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
+        GM_deleteValue(FAILURE_KEY);
         debugLog('info', 'logs-cleared');
-        updateState({ message: '诊断日志已清空' });
+        updateLogCount();
     }
 
     function updateLogCount() {
@@ -537,6 +574,12 @@
     }
 
     function installGlobalErrorLogging() {
+        document.addEventListener('visibilitychange',()=>debugLog('info','page-visibility-changed',{
+            visibility:document.visibilityState,readyState:document.readyState
+        }));
+        window.addEventListener('pagehide',event=>debugLog('info','page-unloading',{
+            persisted:Boolean(event.persisted),phase:getState().phase
+        }));
         window.addEventListener('error', (event) => {
             debugLog('error', 'window-error', {
                 message: event.message,
@@ -1007,6 +1050,7 @@
                 updateState({ status: 'running', phase: 'identifying-account',
                     identityEntry: { startedAt: Date.now(), clicked: false },
                     message: '正在通过学院首页确认当前账号，再进入在学专题' });
+                debugLog('info','identity-entry-requested',{identityKnown:false});
                 location.assign('https://gbpx.gd.gov.cn/gdceportal/index.aspx');
                 return;
             }
@@ -1130,6 +1174,7 @@
         if (state.status !== 'running') return true;
         if (!accountRuntime.guard()) return true;
         if (accountRuntime.hasIdentity()) {
+            debugLog('info','identity-entry-confirmed',{elapsedMs:Date.now()-Number(state.identityEntry?.startedAt || Date.now())});
             updateState({ identityEntry: null, status: 'idle', phase: 'idle' });
             if (new URL(location.href).pathname.startsWith('/gdceportal/dist/')) {
                 location.hash = '#/workshop/workshopindex/classList?classType=3';
@@ -1139,7 +1184,7 @@
         }
         const entry = state.identityEntry;
         if (!entry || Date.now() - entry.startedAt > 30000) {
-            updateState({status:'paused', message:'未能自动确认账号；请在当前容器的学院首页点击“专题学习”，再点击开始'});
+            updateState({status:'paused', phase:'identity-entry-failed', message:'未能自动确认账号；请在当前容器的学院首页点击“专题学习”，再点击开始'});
             return true;
         }
         if (new URL(location.href).pathname !== '/gdceportal/index.aspx' || entry.clicked) return true;
@@ -1149,6 +1194,7 @@
         const target = candidates.find(node => !candidates.some(other => other !== node && node.contains(other)));
         if (target) {
             updateState({identityEntry:{...entry,clicked:true}, message:'正在通过网站专题入口确认账号'});
+            debugLog('info','identity-entry-native-click');
             target.click();
         }
         return true;
@@ -3117,6 +3163,10 @@
         }
     }
 
+    if (typeof bindBootstrapDiagnostics === 'function') bindBootstrapDiagnostics(record => {
+        const level = /invalidated|rejected|missing|failed/.test(record.event) ? 'error' : 'info';
+        debugLog(level, record.event, {observedAt:record.time,origin:record.origin,path:record.path,...record.detail});
+    });
     installGlobalErrorLogging();
     debugLog('info', 'script-boot', {
         version: VERSION,

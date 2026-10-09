@@ -14,6 +14,8 @@ function retireScope(api, scope, now, message) {
 }
 
 async function createAccountRuntime(api, env) {
+    const trace = (event, detail = {}) => { try { env.onDiagnostic?.(event, detail); } catch (_) {} };
+    trace('runtime-entry', {main:env.isMain,top:env.isTop,player:env.isPlayer});
     // Verification pages may redirect before the asynchronous GM_getTab callback.
     // Save only the opaque ticket and entry path, never the course auth query.
     const entry = new URL(env.href());
@@ -30,7 +32,9 @@ async function createAccountRuntime(api, env) {
         const timer = env.setTimeout(() => reject(new Error('读取标签页身份超时')), 5000);
         api.GM_getTab(value => { env.clearTimeout(timer); resolve(value || {}); });
     });
+    trace('tab-lookup-start');
     let tab = await getTab();
+    trace('tab-lookup-ready', {scopePresent:validScope(tab[TAB_SLOT]), directLaunchPresent:Boolean(directLaunch), relayPresent:Boolean(relay)});
     const url = new URL(env.href());
     const launch = directLaunch || relay?.launch;
     if (env.isPlayer && launch && !validScope(tab[TAB_SLOT])) {
@@ -38,8 +42,10 @@ async function createAccountRuntime(api, env) {
         const ticket = api.GM_getValue('gdgbpxLaunchV2:' + launch, null);
         if (!ticket || !validScope(ticket.scope) || ticket.expiresAt < env.now()
             || ticket.origin !== url.origin || ticket.path !== (relay?.path || url.pathname)) {
+            trace('launch-ticket-rejected', {ticketPresent:Boolean(ticket),expired:Boolean(ticket && ticket.expiresAt<env.now())});
             throw new Error('播放器启动标识已失效，请从所属账号主页面重新打开');
         }
+        trace('launch-ticket-bound', {accountScope:ticket.scope.id});
         tab[TAB_SLOT] = ticket.scope;
         api.GM_saveTab(tab);
     } else if (env.isPlayer && launch && validScope(tab[TAB_SLOT])) {
@@ -59,6 +65,7 @@ async function createAccountRuntime(api, env) {
         if (!validScope(previous) || changed) tab[TAB_SLOT] = {version:2,id:env.uuid(),marker,identity};
         else if (identity) tab[TAB_SLOT].identity = identity;
         if (uid) tab[TAB_SLOT].ownerFingerprint = await env.digest('gdgbpx-owner-v1:' + uid);
+        trace('main-identity-bound', {uidPresent:Boolean(uid),identityKnown:Boolean(tab[TAB_SLOT].ownerFingerprint),scopeChanged:changed,accountScope:tab[TAB_SLOT].id});
         lastUid = uid;
         api.GM_saveTab(tab);
     }
@@ -67,15 +74,21 @@ async function createAccountRuntime(api, env) {
         await new Promise(resolve=>env.setTimeout(resolve,100));
         tab = await getTab();
     }
-    if (!validScope(tab[TAB_SLOT])) throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+    if (!validScope(tab[TAB_SLOT])) {
+        trace('player-scope-missing', {directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)});
+        throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+    }
     const scope = {...tab[TAB_SLOT]};
+    let blockedReason = '';
     let blocked = false, pending = false, authPending = false, checkedAuth = '', authClaimKey = '';
     function invalidate(message = '登录会话已变化，已停止旧任务；刷新页面后重新开始') {
         if (blocked) return;
         blocked = true;
+        blockedReason = message;
         retireScope(api, scope, env.now(), message);
         tab[TAB_SLOT] = {...scope, retired:true};
         api.GM_saveTab(tab);
+        trace('account-invalidated', {reason:message,identityKnown:Boolean(scope.ownerFingerprint)});
         env.onBlocked?.(message);
     }
     function guard() {
@@ -103,6 +116,7 @@ async function createAccountRuntime(api, env) {
                     api.GM_saveTab(tab);
                     lastUid = uid;
                     pending = false;
+                    trace('route-identity-confirmed', {identityKnown:true});
                     env.onReady?.();
                 }).catch(() => invalidate('无法核验登录会话，已停止任务'));
             }
@@ -124,6 +138,7 @@ async function createAccountRuntime(api, env) {
         if (checkedAuth === auth && authClaimKey) return guard();
         if (authPending) return false;
         authPending = true;
+        trace('course-ownership-check-start');
         env.digest('gdgbpx-course-auth-v1:' + auth).then(fingerprint => {
             if (!guard()) return;
             const key = 'gdgbpxCourseOwnerV1:' + fingerprint;
@@ -136,7 +151,7 @@ async function createAccountRuntime(api, env) {
             });
             authClaimKey = key;
             checkedAuth = auth;
-            guard();
+            trace('course-ownership-check-result', {allowed:guard()});
         }).catch(() => invalidate('无法核验课程授权归属，已停止任务'))
             .finally(() => { authPending = false; env.onReady?.(); });
         return false;
@@ -147,6 +162,7 @@ async function createAccountRuntime(api, env) {
         if (player.protocol !== 'https:' || !['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(player.hostname)) {
             throw new Error('播放器域名未获支持');
         }
+        trace('launch-ticket-created', {targetOrigin:player.origin,targetPath:player.pathname});
         const ticket = env.uuid();
         api.GM_setValue('gdgbpxLaunchV2:' + ticket, {
             scope, origin:player.origin, path:player.pathname, expiresAt:env.now()+120000
@@ -156,7 +172,10 @@ async function createAccountRuntime(api, env) {
         env.setTimeout(()=>api.GM_deleteValue('gdgbpxLaunchV2:'+ticket),120000);
         return player.href;
     }
-    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),checkCourseAuth,playerUrl,bridgeEnabled:false});
+    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),
+        diagnostics:()=>({accountScope:scope.id,identityKnown:Boolean(scope.ownerFingerprint),
+            blocked,blockedReason,identityCheckPending:pending,courseCheckPending:authPending,
+            courseChecked:Boolean(checkedAuth),directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {

@@ -2,6 +2,22 @@
     'use strict';
     /* ACCOUNT_MODULES */
     const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+    const bootstrapDocumentTag = crypto.randomUUID();
+    const bootstrapTrace = [];
+    let diagnosticSink = null;
+    function recordBootstrap(event, detail = {}) {
+        const route = new URL(location.href);
+        const record = {time:new Date().toISOString(), event, detail,
+            documentTag:bootstrapDocumentTag, origin:route.origin,path:route.pathname,
+            topLevel:window.top===window};
+        bootstrapTrace.push(record);
+        if (bootstrapTrace.length > 80) bootstrapTrace.shift();
+        try { diagnosticSink?.(record); } catch (_) {}
+    }
+    function bindBootstrapDiagnostics(sink) {
+        diagnosticSink = sink;
+        for (const record of bootstrapTrace) { try { sink(record); } catch (_) {} }
+    }
     const isMain = location.hostname === 'gbpx.gd.gov.cn';
     const ready = () => document.readyState === 'loading'
         ? new Promise(resolve => document.addEventListener('DOMContentLoaded',resolve,{once:true})) : Promise.resolve();
@@ -9,11 +25,23 @@
         // MultiLogin must have installed its page storage proxy before we bind a main tab.
         if (isMain) await ready();
         const accountRuntime = await createAccountRuntime(native, {
+            onDiagnostic:recordBootstrap,
             href:()=>location.href,isMain,isTop:window.top===window,
             isPlayer:['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(location.hostname),
             now:()=>Date.now(),uuid:()=>crypto.randomUUID(),setTimeout,clearTimeout,
-            saveLaunch(value) { try { page.sessionStorage.setItem('gdgbpxLaunchRelayV2',JSON.stringify(value)); } catch (_) {} },
-            readLaunch() { try { return JSON.parse(page.sessionStorage.getItem('gdgbpxLaunchRelayV2')||'null'); } catch (_) { return null; } },
+            saveLaunch(value) {
+                try {
+                    page.sessionStorage.setItem('gdgbpxLaunchRelayV2',JSON.stringify(value));
+                    recordBootstrap('launch-relay-saved');
+                } catch (_) { recordBootstrap('launch-relay-save-failed'); }
+            },
+            readLaunch() {
+                try {
+                    const saved=JSON.parse(page.sessionStorage.getItem('gdgbpxLaunchRelayV2')||'null');
+                    recordBootstrap('launch-relay-read',{present:Boolean(saved)});
+                    return saved;
+                } catch (_) { recordBootstrap('launch-relay-read-failed');return null; }
+            },
             sessionMarker() {
                 const key='gdgbpxSessionMarkerV2';
                 let marker=page.localStorage.getItem(key);
@@ -52,6 +80,20 @@
         const node=document.createElement('div');node.setAttribute('role','alert');
         node.style.cssText='position:fixed;left:0;bottom:0;z-index:2147483647;background:white;color:#a40000;padding:12px;border:1px solid red';
         node.textContent='学习助手未启动：'+error.message;
+        recordBootstrap('bootstrap-failed', {errorType:error?.name || 'Error'});
+        const download=document.createElement('button');
+        download.textContent='下载启动诊断';
+        download.addEventListener('click',()=>{
+            const data={schemaVersion:2,scriptVersion:null /* SCRIPT_VERSION */,generatedAt:new Date().toISOString(),
+                context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
+                userAgent:navigator.userAgent,trace:bootstrapTrace};
+            const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
+            const link=document.createElement('a');link.href=href;
+            link.download='gdgbpx-startup-'+bootstrapDocumentTag.slice(0,8)+'.json';
+            document.body.appendChild(link);link.click();link.remove();
+            setTimeout(()=>URL.revokeObjectURL(href),1000);
+        });
+        node.appendChild(download);
         document.body?.appendChild(node);
     }
 })({GM_getValue,GM_setValue,GM_deleteValue,GM_addValueChangeListener,GM_removeValueChangeListener,GM_getTab,GM_saveTab,GM_xmlhttpRequest});

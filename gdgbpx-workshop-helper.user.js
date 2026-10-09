@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.28
+// @version      1.5.29
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -92,6 +92,8 @@ function retireScope(api, scope, now, message) {
 }
 
 async function createAccountRuntime(api, env) {
+    const trace = (event, detail = {}) => { try { env.onDiagnostic?.(event, detail); } catch (_) {} };
+    trace('runtime-entry', {main:env.isMain,top:env.isTop,player:env.isPlayer});
     // Verification pages may redirect before the asynchronous GM_getTab callback.
     // Save only the opaque ticket and entry path, never the course auth query.
     const entry = new URL(env.href());
@@ -108,7 +110,9 @@ async function createAccountRuntime(api, env) {
         const timer = env.setTimeout(() => reject(new Error('读取标签页身份超时')), 5000);
         api.GM_getTab(value => { env.clearTimeout(timer); resolve(value || {}); });
     });
+    trace('tab-lookup-start');
     let tab = await getTab();
+    trace('tab-lookup-ready', {scopePresent:validScope(tab[TAB_SLOT]), directLaunchPresent:Boolean(directLaunch), relayPresent:Boolean(relay)});
     const url = new URL(env.href());
     const launch = directLaunch || relay?.launch;
     if (env.isPlayer && launch && !validScope(tab[TAB_SLOT])) {
@@ -116,8 +120,10 @@ async function createAccountRuntime(api, env) {
         const ticket = api.GM_getValue('gdgbpxLaunchV2:' + launch, null);
         if (!ticket || !validScope(ticket.scope) || ticket.expiresAt < env.now()
             || ticket.origin !== url.origin || ticket.path !== (relay?.path || url.pathname)) {
+            trace('launch-ticket-rejected', {ticketPresent:Boolean(ticket),expired:Boolean(ticket && ticket.expiresAt<env.now())});
             throw new Error('播放器启动标识已失效，请从所属账号主页面重新打开');
         }
+        trace('launch-ticket-bound', {accountScope:ticket.scope.id});
         tab[TAB_SLOT] = ticket.scope;
         api.GM_saveTab(tab);
     } else if (env.isPlayer && launch && validScope(tab[TAB_SLOT])) {
@@ -137,6 +143,7 @@ async function createAccountRuntime(api, env) {
         if (!validScope(previous) || changed) tab[TAB_SLOT] = {version:2,id:env.uuid(),marker,identity};
         else if (identity) tab[TAB_SLOT].identity = identity;
         if (uid) tab[TAB_SLOT].ownerFingerprint = await env.digest('gdgbpx-owner-v1:' + uid);
+        trace('main-identity-bound', {uidPresent:Boolean(uid),identityKnown:Boolean(tab[TAB_SLOT].ownerFingerprint),scopeChanged:changed,accountScope:tab[TAB_SLOT].id});
         lastUid = uid;
         api.GM_saveTab(tab);
     }
@@ -145,15 +152,21 @@ async function createAccountRuntime(api, env) {
         await new Promise(resolve=>env.setTimeout(resolve,100));
         tab = await getTab();
     }
-    if (!validScope(tab[TAB_SLOT])) throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+    if (!validScope(tab[TAB_SLOT])) {
+        trace('player-scope-missing', {directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)});
+        throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+    }
     const scope = {...tab[TAB_SLOT]};
+    let blockedReason = '';
     let blocked = false, pending = false, authPending = false, checkedAuth = '', authClaimKey = '';
     function invalidate(message = '登录会话已变化，已停止旧任务；刷新页面后重新开始') {
         if (blocked) return;
         blocked = true;
+        blockedReason = message;
         retireScope(api, scope, env.now(), message);
         tab[TAB_SLOT] = {...scope, retired:true};
         api.GM_saveTab(tab);
+        trace('account-invalidated', {reason:message,identityKnown:Boolean(scope.ownerFingerprint)});
         env.onBlocked?.(message);
     }
     function guard() {
@@ -181,6 +194,7 @@ async function createAccountRuntime(api, env) {
                     api.GM_saveTab(tab);
                     lastUid = uid;
                     pending = false;
+                    trace('route-identity-confirmed', {identityKnown:true});
                     env.onReady?.();
                 }).catch(() => invalidate('无法核验登录会话，已停止任务'));
             }
@@ -202,6 +216,7 @@ async function createAccountRuntime(api, env) {
         if (checkedAuth === auth && authClaimKey) return guard();
         if (authPending) return false;
         authPending = true;
+        trace('course-ownership-check-start');
         env.digest('gdgbpx-course-auth-v1:' + auth).then(fingerprint => {
             if (!guard()) return;
             const key = 'gdgbpxCourseOwnerV1:' + fingerprint;
@@ -214,7 +229,7 @@ async function createAccountRuntime(api, env) {
             });
             authClaimKey = key;
             checkedAuth = auth;
-            guard();
+            trace('course-ownership-check-result', {allowed:guard()});
         }).catch(() => invalidate('无法核验课程授权归属，已停止任务'))
             .finally(() => { authPending = false; env.onReady?.(); });
         return false;
@@ -225,6 +240,7 @@ async function createAccountRuntime(api, env) {
         if (player.protocol !== 'https:' || !['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(player.hostname)) {
             throw new Error('播放器域名未获支持');
         }
+        trace('launch-ticket-created', {targetOrigin:player.origin,targetPath:player.pathname});
         const ticket = env.uuid();
         api.GM_setValue('gdgbpxLaunchV2:' + ticket, {
             scope, origin:player.origin, path:player.pathname, expiresAt:env.now()+120000
@@ -234,7 +250,10 @@ async function createAccountRuntime(api, env) {
         env.setTimeout(()=>api.GM_deleteValue('gdgbpxLaunchV2:'+ticket),120000);
         return player.href;
     }
-    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),checkCourseAuth,playerUrl,bridgeEnabled:false});
+    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),
+        diagnostics:()=>({accountScope:scope.id,identityKnown:Boolean(scope.ownerFingerprint),
+            blocked,blockedReason,identityCheckPending:pending,courseCheckPending:authPending,
+            courseChecked:Boolean(checkedAuth),directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {
@@ -282,6 +301,22 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
 
     const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+    const bootstrapDocumentTag = crypto.randomUUID();
+    const bootstrapTrace = [];
+    let diagnosticSink = null;
+    function recordBootstrap(event, detail = {}) {
+        const route = new URL(location.href);
+        const record = {time:new Date().toISOString(), event, detail,
+            documentTag:bootstrapDocumentTag, origin:route.origin,path:route.pathname,
+            topLevel:window.top===window};
+        bootstrapTrace.push(record);
+        if (bootstrapTrace.length > 80) bootstrapTrace.shift();
+        try { diagnosticSink?.(record); } catch (_) {}
+    }
+    function bindBootstrapDiagnostics(sink) {
+        diagnosticSink = sink;
+        for (const record of bootstrapTrace) { try { sink(record); } catch (_) {} }
+    }
     const isMain = location.hostname === 'gbpx.gd.gov.cn';
     const ready = () => document.readyState === 'loading'
         ? new Promise(resolve => document.addEventListener('DOMContentLoaded',resolve,{once:true})) : Promise.resolve();
@@ -289,11 +324,23 @@ function createSessionRequest(native,page,runtime,location,timers) {
         // MultiLogin must have installed its page storage proxy before we bind a main tab.
         if (isMain) await ready();
         const accountRuntime = await createAccountRuntime(native, {
+            onDiagnostic:recordBootstrap,
             href:()=>location.href,isMain,isTop:window.top===window,
             isPlayer:['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(location.hostname),
             now:()=>Date.now(),uuid:()=>crypto.randomUUID(),setTimeout,clearTimeout,
-            saveLaunch(value) { try { page.sessionStorage.setItem('gdgbpxLaunchRelayV2',JSON.stringify(value)); } catch (_) {} },
-            readLaunch() { try { return JSON.parse(page.sessionStorage.getItem('gdgbpxLaunchRelayV2')||'null'); } catch (_) { return null; } },
+            saveLaunch(value) {
+                try {
+                    page.sessionStorage.setItem('gdgbpxLaunchRelayV2',JSON.stringify(value));
+                    recordBootstrap('launch-relay-saved');
+                } catch (_) { recordBootstrap('launch-relay-save-failed'); }
+            },
+            readLaunch() {
+                try {
+                    const saved=JSON.parse(page.sessionStorage.getItem('gdgbpxLaunchRelayV2')||'null');
+                    recordBootstrap('launch-relay-read',{present:Boolean(saved)});
+                    return saved;
+                } catch (_) { recordBootstrap('launch-relay-read-failed');return null; }
+            },
             sessionMarker() {
                 const key='gdgbpxSessionMarkerV2';
                 let marker=page.localStorage.getItem(key);
@@ -330,7 +377,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.28';
+    const VERSION = '1.5.29';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -339,6 +386,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const PANEL_COLLAPSED_KEY = 'gdgbpx_workshop_helper_panel_collapsed_v1';
+    const FAILURE_KEY = 'gdgbpx_last_failure_v2';
+    const diagnosticDocumentTag = typeof bootstrapDocumentTag === 'string' ? bootstrapDocumentTag : 'unavailable';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
     const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
@@ -581,7 +630,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function sanitizedUrl() {
         return location.href
-            .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
+            .replace(/([?&#](?:t|token|access_token|authorization|course_auth|gbpx_launch|callbackId|uid|session|sid|secret|sign|signature)=)[^&#]*/gi, '$1[redacted]')
             .slice(0, 500);
     }
 
@@ -679,19 +728,19 @@ function createSessionRequest(native,page,runtime,location,timers) {
         if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
         if (typeof value === 'string') {
             const scrubbed = value
-                .replace(/([?&#](?:t|token|access_token|authorization|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
+                .replace(/([?&#](?:t|token|access_token|authorization|course_auth|gbpx_launch|callbackId|uid|session|sid|secret|sign|signature)=)[^&#\s]*/gi, '$1[redacted]')
                 .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
                 .replace(/(cookie\s*[:=]\s*)[^\r\n,}]+/gi, '$1[redacted]');
             return scrubbed.length > 1000 ? `${scrubbed.slice(0, 1000)}…` : scrubbed;
         }
         if (value instanceof Error) {
-            return { name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 3000) };
+            return sanitizeLogValue({ name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 3000) }, depth);
         }
         if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeLogValue(item, depth + 1));
         if (typeof value === 'object') {
             const result = {};
             for (const [key, item] of Object.entries(value).slice(0, 50)) {
-                if (/token|cookie|authorization|password|secret|session/i.test(key)) {
+                if (/token|cookie|authorization|course_auth|gbpx_launch|password|secret|session|^uid$/i.test(key)) {
                     result[key] = '[redacted]';
                 } else {
                     result[key] = sanitizeLogValue(item, depth + 1);
@@ -743,6 +792,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 time: new Date().toISOString(),
                 level,
                 context: contextName(),
+                accountScope: accountRuntime.id,
+                documentTag: diagnosticDocumentTag,
                 event,
                 url: sanitizedUrl(),
                 detail: sanitizeLogValue(detail)
@@ -750,6 +801,11 @@ function createSessionRequest(native,page,runtime,location,timers) {
             if (suppressedRepeats) entry.detail.suppressedRepeats = suppressedRepeats;
             const logs = compactStoredLogs([...getLogs(), entry]);
             GM_setValue(LOG_KEY, logs);
+            if (level === 'error' || event === 'account-invalidated'
+                || (event === 'state-change' && detail?.from?.phase !== detail?.to?.phase && ['account-context-changed','player-open-failed','login-required','identity-entry-failed'].includes(detail?.to?.phase))) {
+                GM_setValue(FAILURE_KEY, {time:entry.time,event,documentTag:diagnosticDocumentTag,
+                    snapshot:diagnosticSnapshot(),recentLogs:logs.slice(-30)});
+            }
             const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
             console[method]('[GBP助手]', event, entry.detail);
             queueBridgeLog(entry);
@@ -806,16 +862,43 @@ function createSessionRequest(native,page,runtime,location,timers) {
         });
     }
 
+    function diagnosticSnapshot() {
+        const state = getState(), heartbeat = getPlayerHeartbeat();
+        let video = null;
+        try {
+            const element = playerVideo || document.querySelector('video');
+            if (element) video = {paused:element.paused,ended:element.ended,
+                currentTime:element.currentTime,duration:Number.isFinite(element.duration)?element.duration:null,
+                readyState:element.readyState,networkState:element.networkState,errorCode:element.error?.code || null};
+        } catch (_) {}
+        return {
+            runtime:sanitizeLogValue(accountRuntime.diagnostics?.() || {accountScope:accountRuntime.id}),
+            state:sanitizeLogValue(state),
+            page:{context:contextName(),url:sanitizedUrl(),topLevel:window.top===window,
+                visibility:document.visibilityState || 'unknown',readyState:document.readyState,
+                online:typeof navigator==='undefined'?null:navigator.onLine},
+            heartbeat:heartbeat?{ageMs:Math.max(0,Date.now()-Number(heartbeat.at || 0)),
+                matchesCurrentLesson:heartbeat.lessonKey===state.currentLessonKey,
+                currentTime:heartbeat.currentTime,duration:heartbeat.duration,paused:heartbeat.paused}:null,
+            video
+        };
+    }
+
     function diagnosticBundle() {
         const state = getState();
         return {
+            schemaVersion: 2,
+            accountScope: accountRuntime.id,
+            documentTag: diagnosticDocumentTag,
             generatedAt: new Date().toISOString(),
             scriptVersion: VERSION,
             userAgent: navigator.userAgent,
             url: sanitizedUrl(),
             context: contextName(),
             state: sanitizeLogValue(state),
-            logs: getLogs()
+            snapshot: diagnosticSnapshot(),
+            lastFailure: GM_getValue(FAILURE_KEY,null),
+            logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
     }
 
@@ -827,14 +910,14 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const text = diagnosticText();
         GM_setClipboard(text, 'text');
         debugLog('info', 'logs-copied', { entries: getLogs().length });
-        updateState({ message: `已复制 ${getLogs().length} 条诊断日志` });
+        // Export must not replace the failure message or mutate the task state.
     }
 
     function downloadLogs() {
         const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `gdgbpx-helper-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        link.download = `gdgbpx-helper-log-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -844,8 +927,9 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
+        GM_deleteValue(FAILURE_KEY);
         debugLog('info', 'logs-cleared');
-        updateState({ message: '诊断日志已清空' });
+        updateLogCount();
     }
 
     function updateLogCount() {
@@ -866,6 +950,12 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function installGlobalErrorLogging() {
+        document.addEventListener('visibilitychange',()=>debugLog('info','page-visibility-changed',{
+            visibility:document.visibilityState,readyState:document.readyState
+        }));
+        window.addEventListener('pagehide',event=>debugLog('info','page-unloading',{
+            persisted:Boolean(event.persisted),phase:getState().phase
+        }));
         window.addEventListener('error', (event) => {
             debugLog('error', 'window-error', {
                 message: event.message,
@@ -1336,6 +1426,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 updateState({ status: 'running', phase: 'identifying-account',
                     identityEntry: { startedAt: Date.now(), clicked: false },
                     message: '正在通过学院首页确认当前账号，再进入在学专题' });
+                debugLog('info','identity-entry-requested',{identityKnown:false});
                 location.assign('https://gbpx.gd.gov.cn/gdceportal/index.aspx');
                 return;
             }
@@ -1459,6 +1550,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         if (state.status !== 'running') return true;
         if (!accountRuntime.guard()) return true;
         if (accountRuntime.hasIdentity()) {
+            debugLog('info','identity-entry-confirmed',{elapsedMs:Date.now()-Number(state.identityEntry?.startedAt || Date.now())});
             updateState({ identityEntry: null, status: 'idle', phase: 'idle' });
             if (new URL(location.href).pathname.startsWith('/gdceportal/dist/')) {
                 location.hash = '#/workshop/workshopindex/classList?classType=3';
@@ -1468,7 +1560,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
         const entry = state.identityEntry;
         if (!entry || Date.now() - entry.startedAt > 30000) {
-            updateState({status:'paused', message:'未能自动确认账号；请在当前容器的学院首页点击“专题学习”，再点击开始'});
+            updateState({status:'paused', phase:'identity-entry-failed', message:'未能自动确认账号；请在当前容器的学院首页点击“专题学习”，再点击开始'});
             return true;
         }
         if (new URL(location.href).pathname !== '/gdceportal/index.aspx' || entry.clicked) return true;
@@ -1478,6 +1570,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const target = candidates.find(node => !candidates.some(other => other !== node && node.contains(other)));
         if (target) {
             updateState({identityEntry:{...entry,clicked:true}, message:'正在通过网站专题入口确认账号'});
+            debugLog('info','identity-entry-native-click');
             target.click();
         }
         return true;
@@ -3446,6 +3539,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
     }
 
+    if (typeof bindBootstrapDiagnostics === 'function') bindBootstrapDiagnostics(record => {
+        const level = /invalidated|rejected|missing|failed/.test(record.event) ? 'error' : 'info';
+        debugLog(level, record.event, {observedAt:record.time,origin:record.origin,path:record.path,...record.detail});
+    });
     installGlobalErrorLogging();
     debugLog('info', 'script-boot', {
         version: VERSION,
@@ -3466,6 +3563,20 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const node=document.createElement('div');node.setAttribute('role','alert');
         node.style.cssText='position:fixed;left:0;bottom:0;z-index:2147483647;background:white;color:#a40000;padding:12px;border:1px solid red';
         node.textContent='学习助手未启动：'+error.message;
+        recordBootstrap('bootstrap-failed', {errorType:error?.name || 'Error'});
+        const download=document.createElement('button');
+        download.textContent='下载启动诊断';
+        download.addEventListener('click',()=>{
+            const data={schemaVersion:2,scriptVersion:"1.5.29",generatedAt:new Date().toISOString(),
+                context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
+                userAgent:navigator.userAgent,trace:bootstrapTrace};
+            const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
+            const link=document.createElement('a');link.href=href;
+            link.download='gdgbpx-startup-'+bootstrapDocumentTag.slice(0,8)+'.json';
+            document.body.appendChild(link);link.click();link.remove();
+            setTimeout(()=>URL.revokeObjectURL(href),1000);
+        });
+        node.appendChild(download);
         document.body?.appendChild(node);
     }
 })({GM_getValue,GM_setValue,GM_deleteValue,GM_addValueChangeListener,GM_removeValueChangeListener,GM_getTab,GM_saveTab,GM_xmlhttpRequest});

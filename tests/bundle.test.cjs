@@ -5,8 +5,9 @@ const crypto=require('node:crypto').webcrypto;
 const source=fs.readFileSync(path.join(__dirname,'../gdgbpx-workshop-helper.user.js'),'utf8');
 const STATE='gdgbpx_workshop_helper_state_v1';
 function tabState() {return {metadata:{},local:new Map()};}
-async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',documentOverrides={}) {
-    const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,
+async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',documentOverrides={},expectFailure=false) {
+    const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,Blob,
+        navigator:{userAgent:'test-firefox',onLine:true},
         setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},
         location:{href,hostname:url.hostname,hash:url.hash,assign(value){context.assigned=value;}},
         localStorage:{getItem:key=>tab.local.get(key)||null,setItem:(key,value)=>tab.local.set(key,value)},
@@ -16,13 +17,14 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
         GM_getValue:(key,fallback)=>values.has(key)?structuredClone(values.get(key)):fallback,
         GM_setValue:(key,value)=>values.set(key,structuredClone(value)),GM_deleteValue:key=>values.delete(key),
         GM_addValueChangeListener:()=>1,GM_removeValueChangeListener(){},GM_xmlhttpRequest(){},
+        GM_setClipboard:value=>{context.clipboard=value;},
         dispatchEvent(){},
     };
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime};return;\n    installGlobalErrorLogging();'),context);
-    assert.ok(context.testApi,'full userscript must bootstrap');
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
+    if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
 test('published bundle: four main pages and four players retain separate states, stop and reload',async()=>{
@@ -59,7 +61,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.28/);
+    assert.match(source,/@version\s+1\.5\.29/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
     assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').trim());
@@ -126,4 +128,61 @@ test('identity entry respects pause/stop, times out without looping, and does no
     context.testApi.handleIdentityEntry();assert.equal(clicks,0);
     assert.equal(context.testApi.getState().status,'paused');
     assert.equal(context.testApi.accountRuntime.hasIdentity(),false);
+});
+
+test('diagnostic export correlates same-account documents, excludes other accounts and preserves failure across log rollover',async()=>{
+    const values=new Map(),main=await boot(values,tabState()),other=await boot(values,tabState());
+    other.testApi.debugLog('info','OTHER_ACCOUNT_ONLY');
+    const player=await boot(values,tabState(),main.testApi.accountRuntime.playerUrl('https://cs1.gdgbpx.com/play?t=private-auth'));
+    player.testApi.debugLog('info','player-observed');
+    main.testApi.accountRuntime.checkCourseAuth('private-auth');
+    const before=JSON.stringify(main.testApi.getState());
+    main.testApi.handlePanelAction('copylog');
+    assert.equal(JSON.stringify(main.testApi.getState()),before,'copy must retain original failure status/message');
+    let bundle=JSON.parse(main.clipboard);
+    assert.equal(bundle.schemaVersion,2);
+    assert.equal(bundle.snapshot.runtime.blocked,true);
+    assert.equal(bundle.lastFailure.event,'account-invalidated');
+    assert.ok(bundle.logs.some(e=>e.event==='main-identity-bound'));
+    assert.ok(bundle.logs.some(e=>e.event==='launch-ticket-bound'));
+    assert.ok(new Set(bundle.logs.map(e=>e.documentTag)).size>=2);
+    assert.ok(!JSON.stringify(bundle).includes('OTHER_ACCOUNT_ONLY'));
+    assert.ok(!JSON.stringify(bundle).includes('private-auth'));
+    for(let i=0;i<610;i++)main.testApi.debugLog('info','normal-event',{index:i});
+    bundle=main.testApi.diagnosticBundle();
+    assert.ok(bundle.logs.length<=600);
+    assert.equal(bundle.lastFailure.event,'account-invalidated');
+    main.testApi.handlePanelAction('clearlog');
+    assert.equal(main.testApi.diagnosticBundle().lastFailure,null);
+});
+
+test('diagnostic redaction covers course authorization, launch fragments and Error message/stack',async()=>{
+    const context=await boot(new Map(),tabState());
+    const result=vm.runInNewContext(`testApi.sanitizeLogValue({
+        course_auth:'secret-one',uid:'secret-two',
+        url:'https://cs1.gdgbpx.com/play?t=secret-three#gbpx_launch=secret-four',
+        error:new Error('request https://example.test/?token=secret-five')})`,context);
+    assert.ok(!JSON.stringify(result).includes('secret-'));
+});
+
+test('unbound player exposes downloadable bootstrap trace without raw launch credentials',async()=>{
+    const elements=[];
+    const document={body:{appendChild(){}},createElement(tag){
+        const node={tag,children:[],setAttribute(){},style:{},appendChild(n){this.children.push(n);},
+            addEventListener(name,fn){this[name]=fn;},click(){},remove(){}};
+        elements.push(node);return node;
+    }};
+    const context=await boot(new Map(),tabState(),
+        'https://cs1.gdgbpx.com/play?t=secret-course#gbpx_launch=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',document,true);
+    assert.equal(context.testApi,undefined);
+    const button=elements.find(e=>e.tag==='button');assert.equal(button.textContent,'下载启动诊断');
+    let downloaded;
+    context.URL=class extends URL {static createObjectURL(blob){downloaded=blob;return 'blob:test';}static revokeObjectURL(){}};
+    button.click();
+    const data=JSON.parse(await downloaded.text());
+    assert.equal(data.context,'bootstrap-failure');
+    assert.ok(data.trace.some(e=>e.event==='launch-ticket-rejected'));
+    assert.ok(data.trace.some(e=>e.event==='bootstrap-failed'));
+    assert.ok(!JSON.stringify(data).includes('secret-course'));
+    assert.ok(!JSON.stringify(data).includes('aaaaaaaa-aaaa'));
 });
