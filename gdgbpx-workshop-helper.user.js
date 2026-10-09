@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.25
+// @version      1.5.26
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -23,6 +23,7 @@
 // @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      raw.githubusercontent.com
+// @connect      api.github.com
 // @connect      gbpx.gd.gov.cn
 // @grant        GM_getTab
 // @grant        GM_saveTab
@@ -286,7 +287,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.25';
+    const VERSION = '1.5.26';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -574,10 +575,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
         updateCheckMessage = '正在检查更新…';
         renderPanel(getState());
         debugLog('info', 'script-update-check-started', { force, currentVersion: VERSION });
-        new Promise((resolve, reject) => {
+        const requestText = (url) => new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: `${UPDATE_URL}?_gbpx_update_check=${now}`,
+                url,
                 headers: { 'Cache-Control': 'no-cache' },
                 timeout: 10000,
                 anonymous: true,
@@ -591,14 +592,21 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 onerror() { reject(new Error('网络请求失败')); },
                 ontimeout() { reject(new Error('检查更新超时')); }
             });
-        }).then((source) => {
+        });
+        requestText(`https://api.github.com/repos/Linkegee/gdgbpx-workshop-helper/git/ref/heads/main?_gbpx_update_check=${now}`)
+        .then((metadata) => {
+            const commit = JSON.parse(metadata)?.object?.sha;
+            if (!/^[a-f0-9]{40}$/.test(commit || '')) throw new Error('GitHub 返回的提交编号无效');
+            const verifiedUrl = `https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/${commit}/gdgbpx-workshop-helper.user.js`;
+            return requestText(verifiedUrl).then(source => ({source, verifiedUrl}));
+        }).then(({source, verifiedUrl}) => {
             const match = source.match(/^\/\/\s*@version\s+([^\s]+)\s*$/m);
             if (!match) throw new Error('远程脚本缺少 @version');
             const remoteVersion = match[1];
             GM_setValue(UPDATE_CHECK_KEY, Date.now());
             updateCheckPending = false;
             if (isNewerVersion(remoteVersion)) {
-                const available = { version: remoteVersion, url: UPDATE_URL, checkedAt: Date.now() };
+                const available = { version: remoteVersion, url: verifiedUrl, checkedAt: Date.now() };
                 GM_setValue(UPDATE_AVAILABLE_KEY, available);
                 updateCheckMessage = `发现新版 ${remoteVersion}`;
                 debugLog('info', 'script-update-available', {
@@ -609,7 +617,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 return;
             }
             GM_deleteValue(UPDATE_AVAILABLE_KEY);
-            updateCheckMessage = `已检查：当前 v${VERSION} 已是最新版本`;
+            updateCheckMessage = `已检查：未发现比 v${VERSION} 更新的版本`;
             debugLog('info', 'script-update-current', {
                 currentVersion: VERSION,
                 remoteVersion
