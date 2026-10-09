@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.32
+// @version      1.5.33
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -24,6 +24,7 @@
 // @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      raw.githubusercontent.com
+// @connect      github.com
 // @connect      api.github.com
 // @connect      gbpx.gd.gov.cn
 // @grant        GM_getTab
@@ -378,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.32';
+    const VERSION = '1.5.33';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -693,6 +694,18 @@ function createSessionRequest(native,page,runtime,location,timers) {
         .then((metadata) => {
             const commit = JSON.parse(metadata)?.object?.sha;
             if (!/^[a-f0-9]{40}$/.test(commit || '')) throw new Error('GitHub 返回的提交编号无效');
+            return commit;
+        }).catch((error) => {
+            debugLog('warn', 'script-update-metadata-fallback', { error });
+            return requestText(`https://github.com/Linkegee/gdgbpx-workshop-helper/commits/main.atom?_gbpx_update_check=${now}`)
+                .then((feed) => {
+                    // Only accept the first entry: never select an older commit from later entries.
+                    const entry = feed.match(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/);
+                    const commit = entry?.[1].match(/<id>\s*tag:github\.com,2008:Grit::Commit\/([a-f0-9]{40})\s*<\/id>/)?.[1];
+                    if (!commit) throw new Error('GitHub commit feed has no valid latest commit');
+                    return commit;
+                });
+        }).then((commit) => {
             const verifiedUrl = `https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/${commit}/gdgbpx-workshop-helper.user.js`;
             return requestText(verifiedUrl).then(source => ({source, verifiedUrl}));
         }).then(({source, verifiedUrl}) => {
@@ -3622,7 +3635,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.32",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.33",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

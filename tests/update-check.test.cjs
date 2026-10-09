@@ -88,13 +88,25 @@ test('check and install both use the resolved commit, never the stale raw main a
     assert.equal(h.api.getAvailableUpdate().url,h.requests[0].url,'install the exact verified content');
 });
 
-test('API failures and malformed commit identities never fall back to stale main or claim success',async()=>{
-    for(const response of [{status:403,responseText:'rate limited'},
-        {status:200,responseText:JSON.stringify({object:{sha:'unexpected/path'}})}]) {
-        const h=boot(response);h.api.checkForScriptUpdate(true);await settle();
-        assert.equal(h.requests.length,0);
+test('API rate limit falls back to official commit feed and installs immutable content',async()=>{
+    const h=boot({status:403,responseText:'rate limited'});
+    h.api.checkForScriptUpdate(true);await settle();
+    assert.match(h.requests[0]?.url || '',/github\.com\/Linkegee\/gdgbpx-workshop-helper\/commits\/main\.atom/);
+    h.requests[0].onload({status:200,responseText:'<feed><entry><id>tag:github.com,2008:Grit::Commit/'+ 'b'.repeat(40)+'</id></entry></feed>'});await settle();
+    assert.ok(h.requests[1].url.includes('/'+'b'.repeat(40)+'/'));
+    h.requests[1].onload({status:200,responseText:'// @version 9.0.0'});await settle();
+    assert.equal(h.api.getAvailableUpdate().url,h.requests[1].url);
+});
+test('failed or malformed fallback never claims success and allows manual retry',async()=>{
+    for(const fallback of [{status:503,responseText:'unavailable'},
+        {status:200,responseText:'<feed><entry><id>unexpected/path</id></entry></feed>'}]) {
+        const h=boot({status:403,responseText:'rate limited'});h.api.checkForScriptUpdate(true);await settle();
+        assert.equal(h.requests.length,1);
+        h.requests[0].onload(fallback);await settle();
         assert.equal(h.values.has('gdgbpx_workshop_helper_update_check_v1'),false);
+        assert.equal(h.api.getAvailableUpdate(),null);
         h.api.checkForScriptUpdate(true);await settle();
-        assert.equal(h.metadataRequests.length,2,'failed requests release the in-flight lock');
+        assert.equal(h.metadataRequests.length,2);
+        assert.equal(h.requests.length,2);
     }
 });

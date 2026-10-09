@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.32';
+    const VERSION = '1.5.33';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -316,6 +316,18 @@
         .then((metadata) => {
             const commit = JSON.parse(metadata)?.object?.sha;
             if (!/^[a-f0-9]{40}$/.test(commit || '')) throw new Error('GitHub 返回的提交编号无效');
+            return commit;
+        }).catch((error) => {
+            debugLog('warn', 'script-update-metadata-fallback', { error });
+            return requestText(`https://github.com/Linkegee/gdgbpx-workshop-helper/commits/main.atom?_gbpx_update_check=${now}`)
+                .then((feed) => {
+                    // Only accept the first entry: never select an older commit from later entries.
+                    const entry = feed.match(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/);
+                    const commit = entry?.[1].match(/<id>\s*tag:github\.com,2008:Grit::Commit\/([a-f0-9]{40})\s*<\/id>/)?.[1];
+                    if (!commit) throw new Error('GitHub commit feed has no valid latest commit');
+                    return commit;
+                });
+        }).then((commit) => {
             const verifiedUrl = `https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/${commit}/gdgbpx-workshop-helper.user.js`;
             return requestText(verifiedUrl).then(source => ({source, verifiedUrl}));
         }).then(({source, verifiedUrl}) => {
