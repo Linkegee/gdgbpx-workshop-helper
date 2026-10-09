@@ -5,12 +5,12 @@ const crypto=require('node:crypto').webcrypto;
 const source=fs.readFileSync(path.join(__dirname,'../gdgbpx-workshop-helper.user.js'),'utf8');
 const STATE='gdgbpx_workshop_helper_state_v1';
 function tabState() {return {metadata:{},local:new Map()};}
-async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3') {
+async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',documentOverrides={}) {
     const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,
         setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},
         location:{href,hostname:url.hostname,hash:url.hash,assign(value){context.assigned=value;}},
         localStorage:{getItem:key=>tab.local.get(key)||null,setItem:(key,value)=>tab.local.set(key,value)},
-        document:{readyState:'complete',querySelector:()=>null,addEventListener(){},createElement(){throw new Error('Bundle bootstrap failed');}},
+        document:{readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},createElement(){throw new Error('Bundle bootstrap failed');}},
         console:{log(){},warn(){},error(){}},
         GM_getTab:fn=>fn(structuredClone(tab.metadata)),GM_saveTab:obj=>{tab.metadata=structuredClone(obj);},
         GM_getValue:(key,fallback)=>values.has(key)?structuredClone(values.get(key)):fallback,
@@ -18,6 +18,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
         GM_addValueChangeListener:()=>1,GM_removeValueChangeListener(){},GM_xmlhttpRequest(){},
         dispatchEvent(){},
     };
+    Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
         '    globalThis.testApi={getState,updateState,handlePanelAction,accountRuntime};return;\n    installGlobalErrorLogging();'),context);
@@ -58,8 +59,20 @@ test('start on homepage navigates to studying list; update identity and version 
     assert.match(context.assigned,/classList\?classType=3$/);
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.26/);
+    assert.match(source,/@version\s+1\.5\.27/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
     assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').trim());
+});
+
+test('hidden homepage password field does not invalidate a logged-in tab; visible login still blocks',async()=>{
+    let visible=false;
+    const password={getClientRects:()=>visible?[{}]:[]};
+    const context=await boot(new Map(),tabState(),'https://gbpx.gd.gov.cn/gdceportal/index.aspx',{
+        querySelector:selector=>selector==='input[type="password"]'?password:null,
+        querySelectorAll:selector=>selector==='input[type="password"]'?[password]:[]
+    });
+    assert.equal(context.testApi.accountRuntime.guard(),true,'hidden login form must not retire the current session');
+    visible=true;
+    assert.equal(context.testApi.accountRuntime.guard(),false,'visible login form must still retire the session');
 });

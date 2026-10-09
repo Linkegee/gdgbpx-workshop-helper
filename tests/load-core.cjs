@@ -5,5 +5,5 @@ function loadCore() {
     if(!match)throw new Error('Built helper core not found');
     return match[1];
 }
-const runtimeStub={id:'fixture-account',label:'fixture',guard:()=>true,playerUrl:url=>url,bridgeEnabled:false};
+const runtimeStub={id:'fixture-account',label:'fixture',guard:()=>true,checkCourseAuth:()=>true,playerUrl:url=>url,bridgeEnabled:false};
 module.exports={loadCore,runtimeStub};

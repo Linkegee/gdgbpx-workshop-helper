@@ -28,7 +28,9 @@
                 const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
                 return Array.from(new Uint8Array(bytes),n=>n.toString(16).padStart(2,'0')).join('');
             },
-            isLoginPage:()=>Boolean(document.querySelector('input[type="password"]')),
+            // The logged-in homepage retains a hidden login form.
+            isLoginPage:()=>Array.from(document.querySelectorAll('input[type="password"]'))
+                .some(input=>input.getClientRects().length>0),
             onReady:()=>window.dispatchEvent(new Event('gbpx-account-ready')),
             onBlocked:()=>window.dispatchEvent(new Event('gbpx-account-ready'))
         });

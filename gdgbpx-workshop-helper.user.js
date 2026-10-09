@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.26
+// @version      1.5.27
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -136,6 +136,7 @@ async function createAccountRuntime(api, env) {
         if (changed) retireScope(api, previous, env.now(), '登录会话已变化，旧任务已停止');
         if (!validScope(previous) || changed) tab[TAB_SLOT] = {version:2,id:env.uuid(),marker,identity};
         else if (identity) tab[TAB_SLOT].identity = identity;
+        if (uid) tab[TAB_SLOT].ownerFingerprint = await env.digest('gdgbpx-owner-v1:' + uid);
         lastUid = uid;
         api.GM_saveTab(tab);
     }
@@ -146,7 +147,7 @@ async function createAccountRuntime(api, env) {
     }
     if (!validScope(tab[TAB_SLOT])) throw new Error('无法确认播放器所属账号；请从对应主页面启动');
     const scope = {...tab[TAB_SLOT]};
-    let blocked = false, pending = false;
+    let blocked = false, pending = false, authPending = false, checkedAuth = '', authClaimKey = '';
     function invalidate(message = '登录会话已变化，已停止旧任务；刷新页面后重新开始') {
         if (blocked) return;
         blocked = true;
@@ -159,15 +160,23 @@ async function createAccountRuntime(api, env) {
         if (blocked) return false;
         if (!env.isMain || !env.isTop) return true;
         try {
+            if (authClaimKey) {
+                const claim = api.GM_getValue(authClaimKey, null);
+                if (claim?.conflict || (claim && claim.owner !== scope.ownerFingerprint)) {
+                    invalidate('检测到不同账号共用课程授权，存在会话冲突；已停止，请使用独立浏览器配置');
+                    return false;
+                }
+            }
             if (env.sessionMarker() !== scope.marker) { invalidate(); return false; }
             if (env.isLoginPage?.()) { invalidate('登录已失效，请重新登录并刷新页面'); return false; }
             const uid = env.routeUid();
             if (uid && uid !== lastUid && !pending) {
                 pending = true;
-                env.digest(scope.marker + ':' + uid).then(identity => {
+                Promise.all([env.digest(scope.marker + ':' + uid),env.digest('gdgbpx-owner-v1:' + uid)]).then(([identity,ownerFingerprint]) => {
                     if (blocked) return;
                     if (scope.identity && scope.identity !== identity) { invalidate(); return; }
                     scope.identity = identity;
+                    scope.ownerFingerprint = ownerFingerprint;
                     tab[TAB_SLOT] = {...scope};
                     api.GM_saveTab(tab);
                     lastUid = uid;
@@ -177,6 +186,38 @@ async function createAccountRuntime(api, env) {
             }
             return !pending;
         } catch (_) { invalidate('无法读取会话隔离信息，已停止任务'); return false; }
+    }
+    // A route fingerprint is only a conflict detector, not proof that the website
+    // sent requests with that account's cookies. Never treat this as a container.
+    function checkCourseAuth(auth) {
+        if (!guard()) return false;
+        if (!auth) {
+            invalidate('无法读取课程授权，已停止；请从学院首页重新进入专题学习');
+            return false;
+        }
+        if (!scope.ownerFingerprint) {
+            invalidate('尚未确认账号身份；请从学院首页重新进入专题学习后开始');
+            return false;
+        }
+        if (checkedAuth === auth && authClaimKey) return guard();
+        if (authPending) return false;
+        authPending = true;
+        env.digest('gdgbpx-course-auth-v1:' + auth).then(fingerprint => {
+            if (!guard()) return;
+            const key = 'gdgbpxCourseOwnerV1:' + fingerprint;
+            const previous = api.GM_getValue(key, null);
+            const live = previous && previous.expiresAt > env.now();
+            api.GM_setValue(key, {
+                owner: live ? previous.owner : scope.ownerFingerprint,
+                conflict: Boolean(live && (previous.conflict || previous.owner !== scope.ownerFingerprint)),
+                expiresAt: env.now() + 3600000
+            });
+            authClaimKey = key;
+            checkedAuth = auth;
+            guard();
+        }).catch(() => invalidate('无法核验课程授权归属，已停止任务'))
+            .finally(() => { authPending = false; env.onReady?.(); });
+        return false;
     }
     function playerUrl(target) {
         if (!guard()) throw new Error('账号会话尚未核验');
@@ -193,7 +234,7 @@ async function createAccountRuntime(api, env) {
         env.setTimeout(()=>api.GM_deleteValue('gdgbpxLaunchV2:'+ticket),120000);
         return player.href;
     }
-    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,playerUrl,bridgeEnabled:false});
+    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {
@@ -267,7 +308,9 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
                 return Array.from(new Uint8Array(bytes),n=>n.toString(16).padStart(2,'0')).join('');
             },
-            isLoginPage:()=>Boolean(document.querySelector('input[type="password"]')),
+            // The logged-in homepage retains a hidden login form.
+            isLoginPage:()=>Array.from(document.querySelectorAll('input[type="password"]'))
+                .some(input=>input.getClientRects().length>0),
             onReady:()=>window.dispatchEvent(new Event('gbpx-account-ready')),
             onBlocked:()=>window.dispatchEvent(new Event('gbpx-account-ready'))
         });
@@ -287,7 +330,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.26';
+    const VERSION = '1.5.27';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -2107,6 +2150,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 debugLog('warn', 'player-open-fallback-blocked-without-course-context', { lesson: title });
                 return false;
             }
+            if (!accountRuntime.checkCourseAuth(new URL(target.url).searchParams.get('t'))) return false;
             const tab = GM_openInTab(accountRuntime.playerUrl(target.url), {
                 // Automatic lesson handoffs must not select the new player tab.
                 active: false,
@@ -2167,6 +2211,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
             return;
         }
 
+        if (!accountRuntime.checkCourseAuth(readCourseAuth(typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : document))) return;
         const classId = currentClassId();
         if (state.phase === 'detail-ready' && state.lastActionAt && Date.now() - state.lastActionAt < PLAYER_REOPEN_COOLDOWN_MS) {
             return;

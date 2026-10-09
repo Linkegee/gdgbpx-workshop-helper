@@ -79,6 +79,15 @@ function boot(saved, values = new Map()) {
 const active = { status: 'running', phase: 'watching-video', currentClassId: 'class-1',
     currentLessonTitle: '测试课程', currentLessonKey: 'class-1::测试课程', currentLessonProgress: 83.13 };
 
+test('unverified course ownership cannot apply visible progress or open another player',()=>{
+    const h=boot(active);readyDetail(h,[{title:'测试课程',progress:100,status:'已完成'}]);
+    h.context.accountRuntime={...h.context.accountRuntime,checkCourseAuth:()=>false};
+    const before=JSON.stringify(h.api.getState());
+    h.api.handleDetailPage(h.api.getState());
+    assert.equal(JSON.stringify(h.api.getState()),before);
+    assert.equal(h.opened.length,0);
+});
+
 test('background player with a matching live heartbeat gets a bounded loading grace, without duplicate tabs', () => {
     const h=boot({...active,phase:'opening-video',fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
     readyDetail(h);

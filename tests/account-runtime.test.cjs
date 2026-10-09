@@ -19,6 +19,31 @@ function fixture(values=new Map()) {
     return {api,env,values,setMarker:value=>{marker=value;},setUid:value=>{uid=value;}};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('different account routes sharing course authorization stop both scopes before further work',async()=>{
+    const values=new Map(),a=fixture(values),b=fixture(values);
+    a.setUid('synthetic-owner-A');b.setUid('synthetic-owner-B');
+    const ar=await createAccountRuntime(a.api,a.env),br=await createAccountRuntime(b.api,b.env);
+    assert.equal(ar.checkCourseAuth('synthetic-shared-auth'),false);
+    await settle();assert.equal(ar.checkCourseAuth('synthetic-shared-auth'),true);
+    assert.equal(br.checkCourseAuth('synthetic-shared-auth'),false);
+    await settle();assert.equal(br.guard(),false);assert.equal(ar.guard(),false);
+    assert.match(createAccountStorage(a.api,ar.id).GM_getValue(STATE).message,/授权.*冲突/);
+    const dump=JSON.stringify([...values]);
+    assert.ok(!dump.includes('synthetic-shared-auth'));assert.ok(!dump.includes('synthetic-owner'));
+});
+
+test('same account authorization is allowed; unknown identity and late checks cannot authorize opening',async()=>{
+    const values=new Map(),a=fixture(values),b=fixture(values);
+    a.setUid('same-user');b.setUid('same-user');
+    const ar=await createAccountRuntime(a.api,a.env),br=await createAccountRuntime(b.api,b.env);
+    ar.checkCourseAuth('same-auth');await settle();br.checkCourseAuth('same-auth');await settle();
+    assert.equal(ar.checkCourseAuth('same-auth'),true);assert.equal(br.checkCourseAuth('same-auth'),true);
+    const orphan=fixture(values),r=await createAccountRuntime(orphan.api,orphan.env);
+    assert.equal(r.checkCourseAuth('auth'),false);assert.equal(r.guard(),false);
+    const late=fixture(values);late.setUid('late-user');const lr=await createAccountRuntime(late.api,late.env);
+    lr.checkCourseAuth('late-auth');lr.invalidate();await settle();assert.equal(lr.guard(),false);
+});
 test('four scopes preserve reloads and retire only the switched session',async()=>{
     const values=new Map(),tabs=Array.from({length:4},()=>fixture(values));
     const runtimes=await Promise.all(tabs.map(t=>createAccountRuntime(t.api,t.env)));

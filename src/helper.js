@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.26';
+    const VERSION = '1.5.27';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1821,6 +1821,7 @@
                 debugLog('warn', 'player-open-fallback-blocked-without-course-context', { lesson: title });
                 return false;
             }
+            if (!accountRuntime.checkCourseAuth(new URL(target.url).searchParams.get('t'))) return false;
             const tab = GM_openInTab(accountRuntime.playerUrl(target.url), {
                 // Automatic lesson handoffs must not select the new player tab.
                 active: false,
@@ -1881,6 +1882,7 @@
             return;
         }
 
+        if (!accountRuntime.checkCourseAuth(readCourseAuth(typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : document))) return;
         const classId = currentClassId();
         if (state.phase === 'detail-ready' && state.lastActionAt && Date.now() - state.lastActionAt < PLAYER_REOPEN_COOLDOWN_MS) {
             return;
