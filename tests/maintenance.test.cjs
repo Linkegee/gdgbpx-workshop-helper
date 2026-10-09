@@ -111,18 +111,18 @@ test('real maintenance page must leave watching-video and retain the interrupted
     assert.ok(h.api.getState().maintenance);
 });
 
-function readyDetail(h, courses = [{ title: '测试课程', progress: 84, status: '未完成' }]) {
+function readyDetail(h, courses = [{ title: '测试课程', progress: 84, status: '未完成' }], auth = 'test-only') {
     const root = page('detail');
     const component = { info: { playDomain: 'https://player.example/playverif_pc.html' },
-        $$Request: { course_auth: 'test-only' }, listNav: { requiredCourseList: {
+        $$Request: { course_auth: auth }, listNav: { requiredCourseList: {
             listInfo: courses.map((course, index) => ({ courseName: course.title, courseId: `db-${index}`, resourceCode: `resource-${index}` }))
         } } };
     const titles = courses.map((course) => ({ textContent: course.title, scrollIntoView() {},
         parentElement: { __vue__: component, parentElement: null } }));
     const rows = courses.map((course, index) => ({ querySelector(selector) {
         if (selector === '.item_title') return titles[index];
-        if (selector === '.item_status') return { textContent: course.status };
-        if (selector.startsWith('[role="progressbar"]')) return { getAttribute() { return String(course.progress); } };
+        if (selector === '.item_status') return { textContent: course.status,childNodes:[],replaceChildren(){},style:{} };
+        if (selector.startsWith('[role="progressbar"]')) return { getAttribute() { return String(course.progress); },setAttribute(){},querySelector(){return null;} };
         return null;
     } }));
     root.querySelectorAll = (selector) => selector === '#pane-required .item_box' ? rows
@@ -130,6 +130,40 @@ function readyDetail(h, courses = [{ title: '测试课程', progress: 84, status
     h.context.document = root;
     h.context.unsafeWindow = { document: root };
 }
+
+test('progress from another login session cannot mark this account complete', () => {
+    const main=boot(active),other=boot(active);
+    readyDetail(main,undefined,'account-A');
+    readyDetail(other,[{title:'测试课程',progress:92,status:'已完成'}],'account-B');
+    main.api.setProbe(other.context.document);
+    main.api.readServerStatusProbeDocument();
+    assert.equal(main.api.getState().phase,'watching-video');
+    assert.equal(main.api.getState().currentLessonProgress,83.13);
+    assert.equal(main.api.getState().serverCompletedLessonKeys.length,0);
+    main.api.handlePlayerEvent({id:'ended-A',type:'video-ended',lessonKey:active.currentLessonKey,
+        lessonTitle:active.currentLessonTitle,at:main.now()});
+    assert.equal(main.api.getState().phase,'checking-progress','untrusted probe falls back to own main page');
+});
+
+test('verified same-session progress still confirms completion; missing auth falls back without copying progress', () => {
+    for(const auth of ['account-A','']) {
+        const main=boot(active),probe=boot(active);
+        readyDetail(main,undefined,'account-A');
+        readyDetail(probe,[{title:'测试课程',progress:92,status:'已完成'}],auth);
+        main.api.setProbe(probe.context.document);main.api.readServerStatusProbeDocument();
+        assert.equal(main.api.getState().phase,auth?'closing-completed-player':'watching-video');
+        if(!auth)assert.equal(main.api.getState().currentLessonProgress,83.13);
+    }
+});
+
+test('expired player authorization pauses only its matching active lesson', () => {
+    const h=boot(active);
+    h.api.handlePlayerEvent({id:'old-auth-error',type:'player-auth-expired',lessonKey:'other-course'});
+    assert.equal(h.api.getState().status,'running');
+    h.api.handlePlayerEvent({id:'current-auth-error',type:'player-auth-expired',lessonKey:active.currentLessonKey});
+    assert.equal(h.api.getState().status,'paused');
+    assert.equal(h.api.getState().phase,'login-required');
+});
 
 function reopened(h) {
     h.requests.at(-1).onload({ status: 200, responseText: 'shell' });

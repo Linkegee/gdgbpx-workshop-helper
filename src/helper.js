@@ -1,7 +1,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.24';
+    const VERSION = '1.5.25';
+    const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
     const MAINTENANCE_PLAYER_GRACE_MS = 120000;
@@ -1645,6 +1646,19 @@
             }
             return;
         }
+        const mainDocument = (typeof unsafeWindow === 'undefined' ? window : unsafeWindow).document || document;
+        const mainAuth = readCourseAuth(mainDocument);
+        const probeAuth = readCourseAuth(serverStatusFrame.contentDocument);
+        if (!mainAuth || !probeAuth || mainAuth !== probeAuth) {
+            GM_setValue(PROBE_FALLBACK_KEY, true);
+            debugLog('warn', 'server-status-probe-session-unverified', {
+                mainContextAvailable: Boolean(mainAuth), probeContextAvailable: Boolean(probeAuth),
+                sameContext: Boolean(mainAuth && probeAuth && mainAuth === probeAuth)
+            });
+            stopServerStatusMonitor('session-unverified');
+            updateState({ message: '后台页会话无法核验，改在视频结束后刷新本账号页面检查进度' });
+            return;
+        }
         syncVisibleDetailFromProbe(serverStatusFrame.contentDocument, lessons);
         const lesson = lessons.find((item) => item.title === state.currentLessonTitle);
         if (!lesson) {
@@ -1677,6 +1691,7 @@
     }
 
     function syncServerStatusMonitor(state = getState()) {
+        if (GM_getValue(PROBE_FALLBACK_KEY, false)) return;
         if (!serverStatusProbeIsActive(state)) {
             stopServerStatusMonitor('state-not-active');
             return;
@@ -1723,6 +1738,16 @@
 
     function lessonKey(classId, title) {
         return `${classId || 'unknown'}::${title}`;
+    }
+
+    function readCourseAuth(rootDocument) {
+        try {
+            let node = rootDocument.querySelectorAll('.item_title')[0];
+            while (node && !node.__vue__) node = node.parentElement;
+            let component = node?.__vue__;
+            while (component && !component.info?.playDomain) component = component.$parent;
+            return String(component?.$$Request?.course_auth || '');
+        } catch (_) { return ''; }
     }
 
     function resolveCoursePlayerUrl(title) {
@@ -2265,7 +2290,7 @@
         const playerRuntimeEvent = [
             'video-started', 'video-progress', 'video-ended', 'video-closed',
             'player-unloading', 'player-closing', 'video-stalled', 'video-stall-warning',
-            'manual-question'
+            'manual-question', 'player-auth-expired'
         ].includes(event.type);
         if (state.phase !== 'closing-completed-player'
             && playerRuntimeEvent
@@ -2292,6 +2317,12 @@
             return;
         }
 
+        if (event.type === 'player-auth-expired' && state.status === 'running') {
+            updateState({ status: 'paused', phase: 'login-required',
+                message: '播放器授权已过期，请在本账号会话重新登录后刷新主页面' });
+            stopServerStatusMonitor('player-auth-expired');
+            return;
+        }
         if (event.type === 'video-started' && state.status === 'running') {
             if (state.phase === 'closing-completed-player') {
                 debugLog('info', 'completion-close-ignores-video-start', { lessonKey: event.lessonKey });
@@ -2435,13 +2466,13 @@
                     ? '播放器长时间无进度，等待服务器“已完成”状态'
                     : '播放器页面正在离开';
             updateState({
-                phase: event.type === 'video-ended' ? 'watching-video' : 'checking-progress',
+                phase: event.type === 'video-ended' && !GM_getValue(PROBE_FALLBACK_KEY, false) ? 'watching-video' : 'checking-progress',
                 message: `${reason}，实时等待服务器标记“已完成”`,
                 lastActionAt: Date.now(),
                 skipRequestAt: 0
             });
             clearTimeout(detailRefreshTimer);
-            if (event.type === 'video-ended') {
+            if (event.type === 'video-ended' && !GM_getValue(PROBE_FALLBACK_KEY, false)) {
                 reloadServerStatusFrame('video-ended');
             } else {
                 scheduleMainTick();
@@ -2666,6 +2697,11 @@
 
     function playerTick() {
         const state = getState();
+        const authNotice = document.querySelector('.layui-layer-content')?.textContent || '';
+        if (state.status === 'running' && /授权码.*过期|请重新登录/.test(authNotice)) {
+            publishEvent('player-auth-expired');
+            return;
+        }
         syncPlayerIdentityFromVisibleTitle(state);
         writePlayerHeartbeat();
         dismissKnownContinuePrompt();

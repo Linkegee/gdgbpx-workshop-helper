@@ -58,7 +58,7 @@ test('start on homepage navigates to studying list; update identity and version 
     assert.match(context.assigned,/classList\?classType=3$/);
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.24/);
+    assert.match(source,/@version\s+1\.5\.25/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
     assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').trim());
