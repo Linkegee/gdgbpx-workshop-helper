@@ -67,7 +67,7 @@ function boot(saved, values = new Map()) {
             shouldRecoverPausedVideoImmediately, readServerStatusProbeDocument,
             setProbe(doc) { serverStatusFrame = {contentDocument: doc, remove() {}}; },
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
-            writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,
+            writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,handlePlayerCloseRequest,closePlayerWindow,
             setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
             handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
@@ -441,4 +441,43 @@ test('managed close callback cannot resume pause or confirm a replacement player
     h.api.setManagedTab({closed:false,close(){}});callback();
     assert.equal(h.api.getState().phase,'closing-completed-player');
     assert.equal(h.opened.length,0);
+});
+
+
+test('native close button that does nothing must still reach a delayed window close',()=>{
+    const h=boot({...active,phase:'closing-completed-player',completedCloseRequestAt:1800000000000});
+    h.api.setIdentity();let clicks=0,closed=0;
+    h.context.document.querySelector=selector=>selector.includes('#btnexit')?{click(){clicks++;}}:null;
+    h.context.close=()=>closed++;
+    h.api.handlePlayerCloseRequest();
+    assert.equal(clicks,1);
+    for(const timer of [...h.timers.values()]) if(timer.delay===1500) timer.fn();
+    assert.equal(closed,1,'a silent no-op button must not swallow the fallback');
+});
+
+test('outer page processing a close request cannot prevent video frame from pausing',()=>{
+    const shared=new Map(),storage=new Map();
+    const state={...active,phase:'closing-completed-player',completedCloseRequestAt:1800000000000};
+    const top=boot(state,shared),frame=boot(state,shared);let paused=0;
+    for(const h of [top,frame]) {
+        h.api.setIdentity();h.context.sessionStorage={getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)};
+        h.context.close=()=>{};
+    }
+    frame.api.setPlayer({paused:false,pause(){this.paused=true;paused++;}});
+    top.api.handlePlayerCloseRequest();frame.api.handlePlayerCloseRequest();
+    assert.equal(paused,1);
+});
+
+
+test('delayed close cannot act after pause or a different lesson replaces the old task',()=>{
+    for(const change of [{status:'paused'},{currentLessonKey:'different-course'}]) {
+        const h=boot({...active,completedCloseRequestAt:1800000000000});h.api.setIdentity();let closed=0;
+        h.context.document.querySelector=selector=>selector.includes('#btnexit')?{click(){}}:null;
+        h.context.close=()=>closed++;
+        h.api.handlePlayerCloseRequest();
+        h.values.set(STATE,{...h.api.getState(),...change});
+        for(const timer of [...h.timers.values()]) if(timer.delay===1500) timer.fn();
+        assert.equal(closed,0);
+        assert.equal(h.api.shouldRecoverPausedVideoImmediately({paused:true},h.api.getState(),false),false);
+    }
 });

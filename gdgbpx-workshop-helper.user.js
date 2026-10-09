@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.30
+// @version      1.5.31
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -377,7 +377,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.30';
+    const VERSION = '1.5.31';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -437,6 +437,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
     let panel = null;
     let playerVideo = null;
     let playerTimer = null;
+    let handledCloseRequestAt = 0;
+    let playerClosePending = false;
     let lastPlayerProgressAt = Date.now();
     let lastPlayerTime = -1;
     let lastPlayerReportAt = 0;
@@ -3136,10 +3138,14 @@ function createSessionRequest(native,page,runtime,location,timers) {
             state.skipRequestAt || 0,
             state.completedCloseRequestAt || 0
         );
-        const handledAt = Number(sessionStorage.getItem('gbpxHandledCloseRequest:' + accountRuntime.id) || 0);
-        if (requestAt <= handledAt) return false;
-
-        sessionStorage.setItem('gbpxHandledCloseRequest:' + accountRuntime.id, String(requestAt));
+        // Each document must process the request, including the media iframe.
+        if (requestAt <= handledCloseRequestAt) {
+            if (playerClosePending && playerVideo && !playerVideo.paused) playerVideo.pause();
+            return playerClosePending;
+        }
+        handledCloseRequestAt = requestAt;
+        playerClosePending = true;
+        if (playerVideo && !playerVideo.paused) playerVideo.pause();
         const reason = requestAt === state.completedCloseRequestAt
             ? 'server-completion-confirmed'
             : state.stopRequestAt >= state.skipRequestAt
@@ -3402,6 +3408,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function shouldRecoverPausedVideoImmediately(video, state, blockingQuestion = false) {
+        if (playerClosePending) return false;
         return Boolean(video
             && state?.status === 'running'
             && state?.settings?.autoResume
@@ -3440,7 +3447,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function attemptPlayerStart(video) {
         const state = getState();
-        if (state.status !== 'running' || state.maintenance || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
+        if (playerClosePending || state.status !== 'running' || state.maintenance || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
         const source = video.currentSrc || video.getAttribute('src') || '';
         const durationReady = Number.isFinite(video.duration) && video.duration > 0;
         const metadataReady = video.readyState >= 1 && durationReady;
@@ -3486,7 +3493,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
         playerVideo.playbackRate = 1;
 
-        if (state.maintenance || state.status === 'paused' || ['stopped', 'idle', 'complete'].includes(state.status)) {
+        if (playerClosePending || state.maintenance || state.status === 'paused' || ['stopped', 'idle', 'complete'].includes(state.status)) {
             if (!playerVideo.paused) playerVideo.pause();
         }
     }
@@ -3558,6 +3565,18 @@ function createSessionRequest(native,page,runtime,location,timers) {
             ended: Boolean(playerVideo?.ended)
         });
         publishEvent('player-closing', { reason });
+        const closingKey = playerLessonKey;
+        const requestAt = handledCloseRequestAt;
+        const fallback = () => {
+            const latest = getState();
+            if (!accountRuntime.guard() || latest.currentLessonKey !== closingKey
+                || handledCloseRequestAt !== requestAt
+                || (latest.status !== 'running' && reason !== 'stop-request')) return;
+            debugLog('warn', 'player-window-close-fallback', {reason});
+            try { window.top.close(); } catch (_) { try { window.close(); } catch (_) {} }
+        };
+        // A visible site button can silently do nothing. Keep a guarded fallback.
+        setTimeout(fallback, 1500);
         try {
             const topDocument = window.top.document;
             const closeButton = topDocument.querySelector('#btnexit, button.instructions-close');
@@ -3569,12 +3588,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         } catch (_error) {
             // 同源播放器通常允许访问；失败时使用 window.close 兜底。
         }
-        debugLog('warn', 'player-window-close-fallback');
-        try {
-            window.top.close();
-        } catch (_error) {
-            window.close();
-        }
+        fallback();
     }
 
     if (typeof bindBootstrapDiagnostics === 'function') bindBootstrapDiagnostics(record => {
@@ -3605,7 +3619,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.30",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.31",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
