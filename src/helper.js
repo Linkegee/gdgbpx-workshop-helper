@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.29';
+    const VERSION = '1.5.30';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -15,6 +15,7 @@
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
     const UPDATE_AVAILABLE_KEY = 'gdgbpx_workshop_helper_update_available_v1';
+    const PLAYER_MEDIA_HEARTBEAT_KEY = 'gdgbpx_workshop_helper_media_heartbeat_v2';
     const PLAYER_HEARTBEAT_KEY = 'gdgbpx_workshop_helper_player_heartbeat_v1';
     const PLAYER_IDENTITY_SESSION_KEY = 'gdgbpxPlayerIdentityV1:' + accountRuntime.id;
     const UPDATE_URL = 'https://raw.githubusercontent.com/Linkegee/gdgbpx-workshop-helper/main/gdgbpx-workshop-helper.user.js';
@@ -503,6 +504,7 @@
                 online:typeof navigator==='undefined'?null:navigator.onLine},
             heartbeat:heartbeat?{ageMs:Math.max(0,Date.now()-Number(heartbeat.at || 0)),
                 matchesCurrentLesson:heartbeat.lessonKey===state.currentLessonKey,
+                mediaFresh:heartbeat.mediaFresh,mediaAgeMs:heartbeat.mediaAgeMs,
                 currentTime:heartbeat.currentTime,duration:heartbeat.duration,paused:heartbeat.paused}:null,
             video
         };
@@ -1678,10 +1680,35 @@
             serverCompletedLessonKeys: completedLessonKeys
         });
         stopServerStatusMonitor('completion-confirmed');
+        requestManagedCompletionClose();
         return true;
     }
 
+    function requestManagedCompletionClose() {
+        const state = getState(), tab = fallbackPlayerTab;
+        if (!accountRuntime.guard() || state.status !== 'running'
+            || state.phase !== 'closing-completed-player' || !tab || typeof tab.close !== 'function') return;
+        const closingKey = state.currentLessonKey;
+        const confirmed = () => {
+            const latest = getState();
+            if (fallbackPlayerTab !== tab || !accountRuntime.guard()
+                || latest.status !== 'running' || latest.phase !== 'closing-completed-player'
+                || latest.currentLessonKey !== closingKey) return;
+            fallbackPlayerTab = null;
+            confirmCompletedPlayerClosed(latest, 'extension-confirmed-tab-closed', getPlayerHeartbeat());
+        };
+        tab.onclose = confirmed;
+        if (tab.closed === true) { confirmed();return; }
+        try {
+            managedPlayerCloseRequestedAt = Date.now();
+            tab.close();
+            debugLog('info','managed-completion-close-requested',{lessonKey:closingKey});
+            if (tab.closed === true) confirmed();
+        } catch (error) { debugLog('warn','managed-completion-close-error',{error}); }
+    }
+
     function confirmCompletedPlayerClosed(state, reason, heartbeat = null) {
+        fallbackPlayerTab = null;
         clearTimeout(detailRefreshTimer);
         managedPlayerCloseRequestedAt = 0;
         updateState({
@@ -2141,6 +2168,7 @@
                     completedCloseAttempts: attempts,
                     message: `服务器已确认完成，正在重试关闭播放器 (${attempts}/${MAX_COMPLETED_CLOSE_RETRIES})`
                 });
+                requestManagedCompletionClose();
                 debugLog('warn', 'completed-player-close-retry', {
                     lessonKey: state.currentLessonKey,
                     lesson: state.currentLessonTitle,
@@ -2486,7 +2514,7 @@
             } catch (error) {
                 debugLog('warn', 'player-open-fallback-close-failed', { error });
             }
-            fallbackPlayerTab = null;
+            if (state.phase !== 'closing-completed-player') fallbackPlayerTab = null;
         }
 
         if (event.type === 'video-stall-warning' && state.status === 'running') {
@@ -2697,7 +2725,7 @@
         const now = Date.now();
         if (!force && now - lastPlayerHeartbeatWriteAt < PLAYER_HEARTBEAT_INTERVAL_MS) return;
         lastPlayerHeartbeatWriteAt = now;
-        GM_setValue(PLAYER_HEARTBEAT_KEY, {
+        const heartbeat = {
             at: now,
             sessionId: playerSessionId,
             lessonKey: playerLessonKey,
@@ -2706,13 +2734,23 @@
             url: sanitizedUrl(),
             currentTime: Number(playerVideo?.currentTime || 0),
             duration: Number(playerVideo?.duration || 0),
-            paused: Boolean(playerVideo?.paused)
-        });
+            paused: playerVideo ? Boolean(playerVideo.paused) : null
+        };
+        // The outer shell has no video; keep its liveness separate from media data.
+        if (playerVideo) GM_setValue(PLAYER_MEDIA_HEARTBEAT_KEY, heartbeat);
+        GM_setValue(PLAYER_HEARTBEAT_KEY, heartbeat);
     }
 
     function getPlayerHeartbeat() {
         const heartbeat = GM_getValue(PLAYER_HEARTBEAT_KEY, null);
-        return heartbeat && typeof heartbeat === 'object' ? heartbeat : null;
+        if (!heartbeat || typeof heartbeat !== 'object') return null;
+        const media = GM_getValue(PLAYER_MEDIA_HEARTBEAT_KEY, null);
+        const same = media && media.sessionId === heartbeat.sessionId && media.lessonKey === heartbeat.lessonKey;
+        const mediaAgeMs = same ? Math.max(0, Date.now() - Number(media.at || 0)) : null;
+        const fresh = same && mediaAgeMs < 15000;
+        return {...heartbeat, mediaAgeMs, mediaFresh:Boolean(fresh),
+            currentTime:fresh?media.currentTime:null, duration:fresh?media.duration:null,
+            paused:fresh?media.paused:null};
     }
 
     function handlePlayerCloseRequest(state = getState()) {

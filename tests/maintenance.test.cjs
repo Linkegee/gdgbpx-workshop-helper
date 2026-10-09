@@ -67,6 +67,8 @@ function boot(saved, values = new Map()) {
             shouldRecoverPausedVideoImmediately, readServerStatusProbeDocument,
             setProbe(doc) { serverStatusFrame = {contentDocument: doc, remove() {}}; },
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
+            writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,
+            setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
             handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
         installGlobalErrorLogging();`);
@@ -392,4 +394,51 @@ test('managed tabs must confirm closure even when no player heartbeat was ever r
     tab.onclose();
     next.api.mainTick();
     assert.equal(next.opened.length, 1);
+});
+
+
+test('top-level player heartbeat cannot overwrite iframe media time with zero',()=>{
+    const shared=new Map(),frame=boot(active,shared),top=boot(active,shared);
+    frame.api.setIdentity();top.api.setIdentity();
+    frame.api.setPlayer({currentTime:120,duration:300,paused:false});
+    frame.api.writePlayerHeartbeat(true);top.api.writePlayerHeartbeat(true);
+    assert.equal(top.api.getPlayerHeartbeat().currentTime,120);
+    assert.equal(top.api.getPlayerHeartbeat().duration,300);
+});
+
+test('server completion closes managed tab without waiting for a player event and requires confirmation',()=>{
+    const h=boot(active);let closes=0;
+    const tab={closed:false,close(){closes++;}};
+    h.api.setManagedTab(tab);
+    h.api.confirmServerCompletion({title:active.currentLessonTitle,complete:true,progress:100,status:'已完成'});
+    assert.equal(closes,1,'parent must send close even if child events are lost');
+    assert.equal(h.api.getState().phase,'closing-completed-player');
+    assert.equal(h.opened.length,0);
+    tab.closed=true;tab.onclose();
+    assert.equal(h.api.getState().phase,'detail-ready');
+});
+
+
+test('stale or different-player media is not reported as current playback',()=>{
+    const h=boot(active);h.api.setIdentity();
+    h.api.setPlayer({currentTime:120,duration:300,paused:false});h.api.writePlayerHeartbeat(true);
+    h.advance(16000);h.api.setPlayer(null);h.api.writePlayerHeartbeat(true);
+    assert.equal(h.api.getPlayerHeartbeat().currentTime,null);
+    assert.equal(h.api.getPlayerHeartbeat().mediaFresh,false);
+    h.values.set(HEARTBEAT,{at:h.now(),sessionId:'different-player',lessonKey:active.currentLessonKey});
+    assert.equal(h.api.getPlayerHeartbeat().currentTime,null);
+});
+
+test('managed close callback cannot resume pause or confirm a replacement player',()=>{
+    const h=boot(active),tab={closed:false,close(){}};
+    h.api.setManagedTab(tab);
+    h.api.confirmServerCompletion({title:active.currentLessonTitle,complete:true,progress:100});
+    const callback=tab.onclose;
+    h.api.handlePanelAction('pause');callback();
+    assert.equal(h.api.getState().status,'paused');
+    assert.equal(h.api.getState().phase,'closing-completed-player');
+    h.api.handlePanelAction('continue');
+    h.api.setManagedTab({closed:false,close(){}});callback();
+    assert.equal(h.api.getState().phase,'closing-completed-player');
+    assert.equal(h.opened.length,0);
 });
