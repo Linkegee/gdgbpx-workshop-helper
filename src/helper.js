@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.27';
+    const VERSION = '1.5.28';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1003,6 +1003,13 @@
             return;
         }
         if (action === 'start') {
+            if (!accountRuntime.hasIdentity()) {
+                updateState({ status: 'running', phase: 'identifying-account',
+                    identityEntry: { startedAt: Date.now(), clicked: false },
+                    message: '正在通过学院首页确认当前账号，再进入在学专题' });
+                location.assign('https://gbpx.gd.gov.cn/gdceportal/index.aspx');
+                return;
+            }
             if (!isListRoute() && !isDetailRoute()) {
                 updateState({ status: 'running', phase: 'list-ready', message: '正在进入专题学习 → 在学' });
                 location.assign('https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3');
@@ -1118,6 +1125,35 @@
         mainTickTimer = setTimeout(mainTick, 250);
     }
 
+    function handleIdentityEntry(state = getState()) {
+        if (state.phase !== 'identifying-account') return false;
+        if (state.status !== 'running') return true;
+        if (!accountRuntime.guard()) return true;
+        if (accountRuntime.hasIdentity()) {
+            updateState({ identityEntry: null, status: 'idle', phase: 'idle' });
+            if (new URL(location.href).pathname.startsWith('/gdceportal/dist/')) {
+                location.hash = '#/workshop/workshopindex/classList?classType=3';
+            }
+            handlePanelAction('start');
+            return true;
+        }
+        const entry = state.identityEntry;
+        if (!entry || Date.now() - entry.startedAt > 30000) {
+            updateState({status:'paused', message:'未能自动确认账号；请在当前容器的学院首页点击“专题学习”，再点击开始'});
+            return true;
+        }
+        if (new URL(location.href).pathname !== '/gdceportal/index.aspx' || entry.clicked) return true;
+        // Use the site's own authenticated entry, never synthesize or copy a UID.
+        const candidates = [...document.querySelectorAll('a,button,div,li,span')].filter(node =>
+            normalizeText(node.textContent) === '专题学习' && node.getClientRects().length > 0);
+        const target = candidates.find(node => !candidates.some(other => other !== node && node.contains(other)));
+        if (target) {
+            updateState({identityEntry:{...entry,clicked:true}, message:'正在通过网站专题入口确认账号'});
+            target.click();
+        }
+        return true;
+    }
+
     function mainTick() {
         if (!accountRuntime.guard()) { stopServerStatusMonitor('account-changed'); renderPanel(getState()); return; }
         renderPanel(getState());
@@ -1127,6 +1163,11 @@
             return;
         }
         const state = getState();
+        if (handleIdentityEntry(state)) {
+            clearTimeout(mainTickTimer);
+            if (getState().status === 'running') mainTickTimer = setTimeout(mainTick, TICK_MS);
+            return;
+        }
         syncServerStatusMonitor(state);
         if (state.status !== 'running') return;
 

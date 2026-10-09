@@ -156,7 +156,7 @@ async function createAccountRuntime(api, env) {
         env.setTimeout(()=>api.GM_deleteValue('gdgbpxLaunchV2:'+ticket),120000);
         return player.href;
     }
-    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,checkCourseAuth,playerUrl,bridgeEnabled:false});
+    return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {

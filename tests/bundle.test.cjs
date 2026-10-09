@@ -21,7 +21,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,accountRuntime};return;\n    installGlobalErrorLogging();'),context);
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime};return;\n    installGlobalErrorLogging();'),context);
     assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
@@ -53,13 +53,13 @@ test('published bundle: four main pages and four players retain separate states,
     assert.equal(players[1].getState().status,'stopped');
     assert.equal(players[2].getState().status,'running');
 });
-test('start on homepage navigates to studying list; update identity and version remain intact',async()=>{
+test('start on homepage uses native identity entry; update identity and version remain intact',async()=>{
     const context=await boot(new Map(),tabState(),'https://gbpx.gd.gov.cn/gdceportal/dist/#/index');
     context.testApi.handlePanelAction('start');
-    assert.match(context.assigned,/classList\?classType=3$/);
+    assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.27/);
+    assert.match(source,/@version\s+1\.5\.28/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
     assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').trim());
@@ -75,4 +75,55 @@ test('hidden homepage password field does not invalidate a logged-in tab; visibl
     assert.equal(context.testApi.accountRuntime.guard(),true,'hidden login form must not retire the current session');
     visible=true;
     assert.equal(context.testApi.accountRuntime.guard(),false,'visible login form must still retire the session');
+});
+
+test('second account started from a uid-less studying list recovers identity without stopping first account',async()=>{
+    const values=new Map(),first=await boot(values,tabState(),
+        'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3&uid=synthetic-first');
+    first.testApi.handlePanelAction('start');
+    const second=await boot(values,tabState());
+    second.testApi.handlePanelAction('start');
+    assert.equal(second.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx',
+        'unknown identity must return through native homepage entry before processing courses');
+    assert.equal(second.testApi.getState().phase,'identifying-account');
+    assert.equal(first.testApi.getState().status,'running');
+});
+
+test('native identity entry survives same-tab navigation and records UID before entering studying list',async()=>{
+    const values=new Map(),tab=tabState();
+    const list=await boot(values,tab);list.testApi.handlePanelAction('start');
+    let clicks=0;
+    const entry={textContent:'专题学习',getClientRects:()=>[{}],contains:()=>false,click:()=>clicks++};
+    const home=await boot(values,tab,list.assigned,{
+        querySelectorAll:selector=>selector==='a,button,div,li,span'?[entry]:[]
+    });
+    home.testApi.handleIdentityEntry();home.testApi.handleIdentityEntry();assert.equal(clicks,1);
+    const routed=await boot(values,tab,
+        'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?uid=synthetic-second');
+    routed.testApi.handleIdentityEntry();
+    assert.equal(routed.location.hash,'#/workshop/workshopindex/classList?classType=3');
+    assert.equal(routed.testApi.getState().status,'running');
+    assert.equal(routed.testApi.getState().phase,'list-ready');
+    const detail=await boot(values,tab,'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/mergeClass?classId=fixture');
+    const r=detail.testApi.accountRuntime;
+    assert.equal(r.hasIdentity(),true);
+    r.checkCourseAuth('synthetic-second-auth');
+    for(let i=0;i<50 && !r.checkCourseAuth('synthetic-second-auth');i++) await new Promise(resolve=>setTimeout(resolve,2));
+    assert.equal(r.checkCourseAuth('synthetic-second-auth'),true);
+});
+
+test('identity entry respects pause/stop, times out without looping, and does not release unknown identity',async()=>{
+    const values=new Map(),tab=tabState();let clicks=0;
+    const context=await boot(values,tab,'https://gbpx.gd.gov.cn/gdceportal/index.aspx',{
+        querySelectorAll:selector=>selector==='a,button,div,li,span'?
+            [{textContent:'专题学习',getClientRects:()=>[{}],contains:()=>false,click:()=>clicks++}]:[]
+    });
+    context.testApi.handlePanelAction('start');context.testApi.handlePanelAction('pause');
+    context.testApi.handleIdentityEntry();assert.equal(clicks,0);
+    context.testApi.handlePanelAction('stop');context.testApi.handleIdentityEntry();assert.equal(clicks,0);
+    context.testApi.handlePanelAction('start');
+    context.testApi.updateState({identityEntry:{startedAt:Date.now()-60000,clicked:false}});
+    context.testApi.handleIdentityEntry();assert.equal(clicks,0);
+    assert.equal(context.testApi.getState().status,'paused');
+    assert.equal(context.testApi.accountRuntime.hasIdentity(),false);
 });
