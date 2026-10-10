@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.34';
+    const VERSION = '1.5.35';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -513,6 +513,7 @@
                 display:style.display,visibility:style.visibility,opacity:style.opacity};
         };
         return {body:summarize(document.body),app:summarize(document.querySelector('#app')),
+            bodyOutline:Array.from(document.body?.children || []).filter(node=>!['SCRIPT','STYLE','IFRAME'].includes(node.tagName) && node.id !== 'gbpx-helper-panel').slice(0,8).map(node=>({tag:node.tagName,...summarize(node)})),
             panel:summarize(document.querySelector('#gbpx-helper-panel')),
             readyState:document.readyState,visibility:document.visibilityState,
             wasDiscarded:typeof document.wasDiscarded === 'boolean' ? document.wasDiscarded : null,
@@ -534,6 +535,35 @@
         const anomaly = disappeared ? {at:now,before,after:sample} : previous.lastAnomaly;
         GM_setValue(PAGE_HEALTH_KEY,{samples,lastAnomaly:anomaly || null});
         if (disappeared) debugLog('warn','page-structure-disappeared',{before,after:sample});
+    }
+
+    let foregroundHealthGeneration = 0;
+    let foregroundHealthTimers = [];
+    let foregroundHealthFrame = null;
+    function startForegroundHealthCheck() {
+        const generation = ++foregroundHealthGeneration;
+        foregroundHealthTimers.forEach(clearTimeout);
+        foregroundHealthTimers = [];
+        if (foregroundHealthFrame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(foregroundHealthFrame);
+        foregroundHealthFrame = null;
+        if (window.top !== window || location.hostname !== 'gbpx.gd.gov.cn' || document.visibilityState !== 'visible') return;
+        const startedAt = Date.now();
+        const active = () => generation === foregroundHealthGeneration && document.visibilityState === 'visible';
+        recordPageHealth('foreground-start');
+        for (const delay of [1000,3000,5000,10000]) {
+            foregroundHealthTimers.push(setTimeout(()=>{
+                if (active()) recordPageHealth(`foreground-${delay}ms`);
+            },delay));
+        }
+        if (typeof requestAnimationFrame === 'function') {
+            foregroundHealthFrame = requestAnimationFrame(()=>{
+                if (!active()) return;
+                foregroundHealthFrame = null;
+                recordPageHealth('foreground-frame');
+                // A callback indicates renderer scheduling, not proof that pixels reached the screen.
+                debugLog('info','foreground-frame-callback',{delayMs:Date.now()-startedAt});
+            });
+        }
     }
 
     function diagnosticSnapshot() {
@@ -628,6 +658,9 @@
 
     function installGlobalErrorLogging() {
         recordPageHealth('boot');
+        startForegroundHealthCheck();
+        document.addEventListener('visibilitychange',startForegroundHealthCheck);
+        window.addEventListener('pageshow',startForegroundHealthCheck);
         setInterval(()=>recordPageHealth(),30000);
         for (const name of ['pageshow','pagehide','online','offline']) {
             window.addEventListener(name,event=>{
