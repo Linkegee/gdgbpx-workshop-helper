@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.38';
+    const VERSION = '1.5.39';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -40,7 +40,7 @@
     const TICK_MS = 1200;
     // Do not reload the visible Vue detail page while a player is active. The
     // hidden same-origin probe below is used for server-status polling instead.
-    const SERVER_STATUS_PROBE_INTERVAL_MS = 6500;
+    const SERVER_STATUS_PROBE_INTERVAL_MS = 30000;
     const SERVER_STATUS_PROBE_TIMEOUT_MS = 20000;
     const COMPLETED_CLOSE_RETRY_MS = 6000;
     const COMPLETED_CLOSE_GRACE_MS = 60000;
@@ -1164,7 +1164,7 @@
             const managedAlive = fallbackPlayerTab && fallbackPlayerTab.closed !== true;
             const stopPending = state.currentLessonKey && state.stopRequestAt && Date.now()-state.stopRequestAt < 30000;
             if (heartbeatAlive || managedAlive || stopPending) {
-                updateState({message:'仍检测到原播放器或正在等待关闭，请先关闭原视频页，再点开始；暂停后恢复请点继续'});
+                updateState({message:managedAlive ? '播放器标签页尚未确认关闭，请检查对应视频页' : heartbeatAlive ? '仍收到播放器心跳；暂停后恢复请点继续' : `正在等待停止指令处理，还需约 ${Math.max(1,Math.ceil((30000-(Date.now()-state.stopRequestAt))/1000))} 秒，再点开始`});
                 debugLog('warn','start-blocked-existing-player',{heartbeatAlive:Boolean(heartbeatAlive),
                     managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
                 return;
@@ -1218,6 +1218,10 @@
         }
         if (action === 'continue') {
             if (state.status === 'stopped') { handlePanelAction('start'); return; }
+            if (state.phase === 'player-stalled') {
+                updateState({status:'running',phase:'watching-video',message:'继续当前播放器'});
+                return;
+            }
             const retryPlayerOpen = state.phase === 'player-open-failed' && isDetailRoute();
             const continueAfterManualClose = state.phase === 'completed-close-failed' && isDetailRoute();
             const recheckUnverifiedCompletion = state.phase === 'completion-unverified' && isDetailRoute();
@@ -2044,6 +2048,30 @@
         }
     }
 
+    function trackManagedPlayerTab(tab) {
+        fallbackPlayerTab = tab || null;
+        if (!tab) return;
+        const ownedLesson = getState().currentLessonKey;
+        tab.onclose = () => {
+            if (fallbackPlayerTab !== tab || !accountRuntime.guard()) return;
+            fallbackPlayerTab = null;
+            const state = getState();
+            if (state.currentLessonKey !== ownedLesson) return;
+            const heartbeat = getPlayerHeartbeat();
+            if (heartbeat?.lessonKey === ownedLesson) {
+                GM_deleteValue(PLAYER_HEARTBEAT_KEY);
+                GM_deleteValue(PLAYER_MEDIA_HEARTBEAT_KEY);
+            }
+            debugLog('info','managed-player-manually-closed',{lessonKey:ownedLesson});
+            if (state.status === 'stopped') {
+                updateState({stopRequestAt:0,message:'已停止，并确认播放器关闭；可点击开始'});
+            }
+            if (state.status === 'running' && ['opening-video','watching-video','checking-progress','refresh-delay'].includes(state.phase)) {
+                updateState({status:'paused',phase:'player-manually-closed',message:'已确认播放器关闭，点击开始重新读取课程'});
+            }
+        };
+    }
+
     function openPlayerFallbackTab(title, trigger = 'fallback') {
         if (!accountRuntime.guard()) return false;
         try {
@@ -2063,7 +2091,7 @@
                 insert: true,
                 setParent: true
             });
-            fallbackPlayerTab = tab || null;
+            trackManagedPlayerTab(tab);
             debugLog(trigger === 'primary' ? 'info' : 'warn',
                 trigger === 'primary' ? 'player-open-managed-tab' : 'player-open-fallback-tab', {
                 playDomain: target.playDomain,
@@ -2213,7 +2241,7 @@
                 confirmServerCompletion(currentLesson, 'visible-detail-dom');
                 return;
             } else {
-                if (state.phase === 'refresh-delay' && Date.now() - state.lastActionAt < 6500) return;
+                if (state.phase === 'refresh-delay' && Date.now() - state.lastActionAt < SERVER_STATUS_PROBE_INTERVAL_MS) return;
                 const attempt = Math.min(9999, Number(state.refreshAttempts || 0) + 1);
                 updateState({
                     phase: 'refresh-delay',
@@ -2225,7 +2253,7 @@
                 clearTimeout(detailRefreshTimer);
                 debugLog('info', 'server-status-probe-rescheduled', {
                     attempt,
-                    delayMs: 6500,
+                    delayMs: SERVER_STATUS_PROBE_INTERVAL_MS,
                     progress: currentLesson.progress,
                     status: currentLesson.status
                 });
@@ -2245,7 +2273,7 @@
                     updateState({ phase: 'checking-progress', message: '实时复查服务器“已完成”状态', lastActionAt: Date.now() });
                     reloadServerStatusFrame('retry-after-video-close');
                     scheduleMainTick();
-                }, 6500);
+                }, SERVER_STATUS_PROBE_INTERVAL_MS);
                 return;
             }
         }
@@ -2954,6 +2982,35 @@
         playerTick();
     }
 
+    let mediaRecoveryAttempts = 0;
+    let mediaRecoveryListener = null;
+    function recoverStalledMedia(state = getState()) {
+        const video = playerVideo;
+        if (!video || state.status !== 'running' || state.maintenance || playerClosePending
+            || !accountRuntime.guard() || !playerLessonKey || playerLessonKey !== state.currentLessonKey) return false;
+        if (mediaRecoveryAttempts >= 2) {
+            updateState({status:'paused',phase:'player-stalled',message:'当前视频两次重新加载后仍无进度，已暂停；请检查网络和播放器后点继续'});
+            video.pause();
+            debugLog('error','media-recovery-exhausted',{attempts:mediaRecoveryAttempts});
+            return true;
+        }
+        if (typeof video.load !== 'function' || typeof video.addEventListener !== 'function') return false;
+        mediaRecoveryAttempts += 1;
+        const lesson = playerLessonKey, position = Number(video.currentTime || 0), source = video.currentSrc || video.src;
+        if (mediaRecoveryListener) video.removeEventListener('loadedmetadata',mediaRecoveryListener);
+        mediaRecoveryListener = () => {
+            const latest = getState();
+            if (latest.status !== 'running' || latest.currentLessonKey !== lesson || playerVideo !== video
+                || latest.maintenance || playerClosePending || !accountRuntime.guard() || (video.currentSrc || video.src) !== source) return;
+            if (position > 0 && Number.isFinite(video.duration) && position < video.duration) video.currentTime = position;
+            attemptPlayerStart(video);
+        };
+        video.addEventListener('loadedmetadata',mediaRecoveryListener,{once:true});
+        debugLog('warn','media-recovery-reload',{attempt:mediaRecoveryAttempts,currentTime:position});
+        video.load();
+        return true;
+    }
+
     function playerTick() {
         const state = getState();
         const authNotice = document.querySelector('.layui-layer-content')?.textContent || '';
@@ -3033,6 +3090,7 @@
                 publishEvent('video-stalled', { currentTime: current, duration: Number(playerVideo.duration || 0) });
                 closePlayerWindow('stall-auto-reopen');
             } else {
+                if (recoverStalledMedia(state)) return;
                 publishEvent('video-stall-warning', {
                     currentTime: current,
                     duration: Number(playerVideo.duration || 0),

@@ -69,7 +69,7 @@ function boot(saved, values = new Map()) {
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
             writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,handlePlayerCloseRequest,closePlayerWindow,
             setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
-            handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
+            recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
         installGlobalErrorLogging();`);
     vm.runInNewContext(instrumented, context);
@@ -491,4 +491,24 @@ test('player frame uses granted sandbox close even when native top.close silentl
     h.api.handlePlayerCloseRequest();
     assert.equal(privileged,1);
     assert.equal(native,0);
+});
+
+
+test('manual managed tab close clears stale heartbeat, pauses current course and ignores replaced handles',()=>{
+ const h=boot(active),tab={close(){}};
+ h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey});
+ h.api.trackManagedPlayerTab(tab);tab.onclose();
+ assert.equal(h.api.getState().phase,'player-manually-closed');
+ assert.equal(h.api.getPlayerHeartbeat(),null);
+ const next={close(){}};h.api.trackManagedPlayerTab(next);tab.onclose();
+ assert.equal(typeof next.onclose,'function');
+});
+test('media recovery retries the same element twice then pauses, never opens another tab',()=>{
+ const h=boot(active);h.api.setIdentity();let loads=0,paused=0,listener;
+ const video={currentTime:42,duration:100,currentSrc:'https://example.test/video',load(){loads++;},pause(){paused++;},
+ addEventListener(name,fn){listener=fn;},removeEventListener(){}};
+ h.api.setPlayer(video);
+ h.api.recoverStalledMedia();h.api.recoverStalledMedia();h.api.recoverStalledMedia();
+ assert.equal(loads,2);assert.equal(h.api.getState().phase,'player-stalled');assert.equal(paused,1);assert.equal(h.opened.length,0);
+ video.currentTime=0;listener();assert.equal(video.currentTime,0,'late metadata cannot resume paused task');
 });
