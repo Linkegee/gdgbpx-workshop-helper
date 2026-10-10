@@ -23,7 +23,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,recordPageHealth,startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,setHeartbeat(value){GM_setValue(PLAYER_HEARTBEAT_KEY,value);},recordPageHealth,startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
     if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
@@ -61,7 +61,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.35/);
+    assert.match(source,/@version\s+1\.5\.36/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -221,4 +221,32 @@ test('foreground checks capture brief disappearance and cancel stale callbacks a
     c.document.visibilityState='hidden';c.testApi.startForegroundHealthCheck();
     const count=c.testApi.diagnosticBundle().pageHealth.samples.length;
     timers[2].fn();assert.equal(c.testApi.diagnosticBundle().pageHealth.samples.length,count);
+});
+
+
+test('stop then immediate start preserves old lesson and close request until old player is gone',async()=>{
+    const c=await boot(new Map(),tabState());
+    c.testApi.updateState({status:'running',phase:'watching-video',currentLessonKey:'class::lesson',currentLessonTitle:'lesson'});
+    c.testApi.handlePanelAction('stop');
+    const stopped=c.testApi.getState();
+    c.testApi.handlePanelAction('start');
+    assert.equal(c.testApi.getState().status,'stopped');
+    assert.equal(c.testApi.getState().currentLessonKey,'class::lesson');
+    assert.equal(c.testApi.getState().stopRequestAt,stopped.stopRequestAt);
+    c.testApi.updateState({stopRequestAt:Date.now()-60000});
+    c.testApi.handlePanelAction('start');
+    assert.equal(c.testApi.getState().status,'running');
+});
+
+
+test('fresh scoped heartbeat blocks restart even after stop grace elapsed',async()=>{
+    const c=await boot(new Map(),tabState());
+    c.testApi.updateState({status:'stopped',phase:'stopped',stopRequestAt:Date.now()-60000,currentLessonKey:'old'});
+    c.testApi.setHeartbeat({at:Date.now(),lessonKey:'old',sessionId:'old-player'});
+    c.testApi.handlePanelAction('start');
+    assert.equal(c.testApi.getState().status,'stopped');
+    assert.equal(c.testApi.getState().currentLessonKey,'old');
+    c.testApi.updateState({status:'running',phase:'watching-video'});
+    c.testApi.handlePanelAction('start');
+    assert.equal(c.testApi.getState().phase,'watching-video');
 });

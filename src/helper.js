@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.35';
+    const VERSION = '1.5.36';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1150,6 +1150,21 @@
             return;
         }
         if (action === 'start') {
+            // Start must not retire a player that is still alive or still processing Stop.
+            if (state.status === 'running') {
+                debugLog('info','start-ignored-already-running',{phase:state.phase});
+                return;
+            }
+            const heartbeat = getPlayerHeartbeat();
+            const heartbeatAlive = heartbeat && Date.now()-Number(heartbeat.at || 0) < 30000;
+            const managedAlive = fallbackPlayerTab && fallbackPlayerTab.closed !== true;
+            const stopPending = state.currentLessonKey && state.stopRequestAt && Date.now()-state.stopRequestAt < 30000;
+            if (heartbeatAlive || managedAlive || stopPending) {
+                updateState({message:'仍检测到原播放器或正在等待关闭，请先关闭原视频页，再点开始；暂停后恢复请点继续'});
+                debugLog('warn','start-blocked-existing-player',{heartbeatAlive:Boolean(heartbeatAlive),
+                    managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
+                return;
+            }
             if (!accountRuntime.hasIdentity()) {
                 updateState({ status: 'running', phase: 'identifying-account',
                     identityEntry: { startedAt: Date.now(), clicked: false },

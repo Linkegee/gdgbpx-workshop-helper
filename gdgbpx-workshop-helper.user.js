@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.35
+// @version      1.5.36
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.35';
+    const VERSION = '1.5.36';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1528,6 +1528,21 @@ function createSessionRequest(native,page,runtime,location,timers) {
             return;
         }
         if (action === 'start') {
+            // Start must not retire a player that is still alive or still processing Stop.
+            if (state.status === 'running') {
+                debugLog('info','start-ignored-already-running',{phase:state.phase});
+                return;
+            }
+            const heartbeat = getPlayerHeartbeat();
+            const heartbeatAlive = heartbeat && Date.now()-Number(heartbeat.at || 0) < 30000;
+            const managedAlive = fallbackPlayerTab && fallbackPlayerTab.closed !== true;
+            const stopPending = state.currentLessonKey && state.stopRequestAt && Date.now()-state.stopRequestAt < 30000;
+            if (heartbeatAlive || managedAlive || stopPending) {
+                updateState({message:'仍检测到原播放器或正在等待关闭，请先关闭原视频页，再点开始；暂停后恢复请点继续'});
+                debugLog('warn','start-blocked-existing-player',{heartbeatAlive:Boolean(heartbeatAlive),
+                    managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
+                return;
+            }
             if (!accountRuntime.hasIdentity()) {
                 updateState({ status: 'running', phase: 'identifying-account',
                     identityEntry: { startedAt: Date.now(), clicked: false },
@@ -3723,7 +3738,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.35",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.36",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
