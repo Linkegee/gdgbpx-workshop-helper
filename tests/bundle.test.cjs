@@ -61,7 +61,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.37/);
+    assert.match(source,/@version\s+1\.5\.38/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -260,4 +260,27 @@ test('recheck never resumes a stopped task with a stale stop command',async()=>{
     assert.equal(c.testApi.getState().phase,'stopped');
     assert.equal(c.testApi.getState().stopRequestAt,123);
     assert.equal(reloads,1);
+});
+
+
+test('restart from homepage clears old close commands before routing to studying list',async()=>{
+ const c=await boot(new Map(),tabState(),'https://gbpx.gd.gov.cn/gdceportal/dist/#/index');
+ c.testApi.updateState({status:'stopped',phase:'stopped',stopRequestAt:Date.now()-60000,currentLessonKey:'old',skipRequestAt:123,completedCloseRequestAt:456});
+ c.testApi.handlePanelAction('start');
+ assert.equal(c.testApi.getState().stopRequestAt,0);
+ assert.equal(c.testApi.getState().skipRequestAt,0);
+ assert.equal(c.testApi.getState().completedCloseRequestAt,0);
+ assert.equal(c.testApi.getState().currentLessonKey,'');
+ assert.match(c.assigned,/index.aspx|classList/);
+});
+test('explicit start retries abandoned completion checks but preserves live playback',async()=>{
+ const c=await boot(new Map(),tabState());
+ c.testApi.updateState({status:'running',phase:'refresh-delay',currentLessonKey:'old',lastActionAt:Date.now()-90000});
+ c.testApi.setHeartbeat({at:Date.now()-90000,lessonKey:'old'});
+ c.testApi.handlePanelAction('start');
+ assert.notEqual(c.testApi.getState().phase,'refresh-delay');
+ c.testApi.updateState({status:'running',phase:'refresh-delay'});
+ c.testApi.setHeartbeat({at:Date.now(),lessonKey:'old'});
+ c.testApi.handlePanelAction('start');
+ assert.equal(c.testApi.getState().phase,'refresh-delay');
 });

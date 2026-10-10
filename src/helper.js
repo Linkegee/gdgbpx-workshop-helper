@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.37';
+    const VERSION = '1.5.38';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1151,7 +1151,11 @@
         }
         if (action === 'start') {
             // Start must not retire a player that is still alive or still processing Stop.
-            if (state.status === 'running') {
+            const priorHeartbeat = getPlayerHeartbeat();
+            const retryAbandonedCheck = ['refresh-delay','checking-progress'].includes(state.phase)
+                && priorHeartbeat && Date.now()-Number(priorHeartbeat.at || 0) >= 60000
+                && (!fallbackPlayerTab || fallbackPlayerTab.closed === true);
+            if (state.status === 'running' && !retryAbandonedCheck) {
                 debugLog('info','start-ignored-already-running',{phase:state.phase});
                 return;
             }
@@ -1165,25 +1169,12 @@
                     managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
                 return;
             }
-            if (!accountRuntime.hasIdentity()) {
-                updateState({ status: 'running', phase: 'identifying-account',
-                    identityEntry: { startedAt: Date.now(), clicked: false },
-                    message: '正在通过学院首页确认当前账号，再进入在学专题' });
-                debugLog('info','identity-entry-requested',{identityKnown:false});
-                location.assign('https://gbpx.gd.gov.cn/gdceportal/index.aspx');
-                return;
-            }
-            if (!isListRoute() && !isDetailRoute()) {
-                updateState({ status: 'running', phase: 'list-ready', message: '正在进入专题学习 → 在学' });
-                location.assign('https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3');
-                return;
-            }
             const freshRun = ['idle', 'stopped', 'complete'].includes(state.status);
             const resetSkipped = freshRun || state.phase === 'all-unfinished-skipped';
             updateState({
                 status: 'running',
                 maintenance: freshRun ? null : state.maintenance,
-                phase: isListRoute() ? 'list-ready' : 'detail-ready',
+                phase: isDetailRoute() ? 'detail-ready' : 'list-ready',
                 message: '已启动，正在读取当前页面',
                 lastActionAt: 0,
                 refreshAttempts: 0,
@@ -1203,6 +1194,18 @@
                 openAttempts: 0,
                 fallbackOpenAttempted: false
             });
+            if (!accountRuntime.hasIdentity()) {
+                updateState({ status: 'running', phase: 'identifying-account',
+                    identityEntry: { startedAt: Date.now(), clicked: false },
+                    message: '正在通过学院首页确认当前账号，再进入在学专题' });
+                debugLog('info','identity-entry-requested',{identityKnown:false});
+                location.assign('https://gbpx.gd.gov.cn/gdceportal/index.aspx');
+                return;
+            }
+            if (!isListRoute() && !isDetailRoute()) {
+                location.assign('https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3');
+                return;
+            }
             scheduleMainTick();
             return;
         }
