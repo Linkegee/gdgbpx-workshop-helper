@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.36';
+    const VERSION = '1.5.37';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1214,6 +1214,7 @@
             return;
         }
         if (action === 'continue') {
+            if (state.status === 'stopped') { handlePanelAction('start'); return; }
             const retryPlayerOpen = state.phase === 'player-open-failed' && isDetailRoute();
             const continueAfterManualClose = state.phase === 'completed-close-failed' && isDetailRoute();
             const recheckUnverifiedCompletion = state.phase === 'completion-unverified' && isDetailRoute();
@@ -1274,8 +1275,8 @@
         }
         if (action === 'recheck') {
             updateState({
-                status: state.status === 'paused' ? 'paused' : 'running',
-                phase: isDetailRoute() ? 'checking-progress' : 'list-ready',
+                status: state.status,
+                phase: state.status === 'running' ? (isDetailRoute() ? 'checking-progress' : 'list-ready') : state.phase,
                 message: '重新加载并检查服务器进度',
                 refreshAttempts: 0
             });

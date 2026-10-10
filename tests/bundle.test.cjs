@@ -61,7 +61,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.36/);
+    assert.match(source,/@version\s+1\.5\.37/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -249,4 +249,15 @@ test('fresh scoped heartbeat blocks restart even after stop grace elapsed',async
     c.testApi.updateState({status:'running',phase:'watching-video'});
     c.testApi.handlePanelAction('start');
     assert.equal(c.testApi.getState().phase,'watching-video');
+});
+
+
+test('recheck never resumes a stopped task with a stale stop command',async()=>{
+    const c=await boot(new Map(),tabState());let reloads=0;c.location.reload=()=>reloads++;
+    c.testApi.updateState({status:'stopped',phase:'stopped',stopRequestAt:123,currentLessonKey:'old'});
+    c.testApi.handlePanelAction('recheck');
+    assert.equal(c.testApi.getState().status,'stopped');
+    assert.equal(c.testApi.getState().phase,'stopped');
+    assert.equal(c.testApi.getState().stopRequestAt,123);
+    assert.equal(reloads,1);
 });
