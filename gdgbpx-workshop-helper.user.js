@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.33
+// @version      1.5.34
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.33';
+    const VERSION = '1.5.34';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -879,6 +879,41 @@ function createSessionRequest(native,page,runtime,location,timers) {
         });
     }
 
+    const PAGE_HEALTH_KEY = 'gdgbpx_page_health_v1';
+    let lastHealthSampleAt = 0;
+    function pageStructureSummary() {
+        const summarize = (element) => {
+            if (!element) return {present:false};
+            const rect = element.getBoundingClientRect?.();
+            const style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : {};
+            return {present:true,children:element.childElementCount || 0,
+                width:rect ? Math.round(rect.width) : null,height:rect ? Math.round(rect.height) : null,
+                display:style.display,visibility:style.visibility,opacity:style.opacity};
+        };
+        return {body:summarize(document.body),app:summarize(document.querySelector('#app')),
+            panel:summarize(document.querySelector('#gbpx-helper-panel')),
+            readyState:document.readyState,visibility:document.visibilityState,
+            wasDiscarded:typeof document.wasDiscarded === 'boolean' ? document.wasDiscarded : null,
+            navigationType:typeof performance !== 'undefined' ? performance.getEntriesByType?.('navigation')?.[0]?.type : null};
+    }
+    function recordPageHealth(reason = 'interval') {
+        if (window.top !== window || location.hostname !== 'gbpx.gd.gov.cn') return;
+        const now = Date.now(), structure = pageStructureSummary();
+        const previous = GM_getValue(PAGE_HEALTH_KEY, {samples:[],lastAnomaly:null});
+        const sample = {at:now,documentTag:diagnosticDocumentTag,reason,
+            gapMs:lastHealthSampleAt ? now-lastHealthSampleAt : null,structure};
+        lastHealthSampleAt = now;
+        const samples = [...(Array.isArray(previous.samples)?previous.samples:[]),sample].slice(-40);
+        // Compare only within this document; initial loading and other tabs are not disappearance.
+        const before = [...samples].reverse().find(item=>item !== sample && item.documentTag===diagnosticDocumentTag);
+        const disappeared = before && ['body','app','panel'].some(key=>
+            before.structure?.[key]?.present && (!structure[key].present ||
+            (before.structure[key].children > 0 && structure[key].children === 0)));
+        const anomaly = disappeared ? {at:now,before,after:sample} : previous.lastAnomaly;
+        GM_setValue(PAGE_HEALTH_KEY,{samples,lastAnomaly:anomaly || null});
+        if (disappeared) debugLog('warn','page-structure-disappeared',{before,after:sample});
+    }
+
     function diagnosticSnapshot() {
         const state = getState(), heartbeat = getPlayerHeartbeat();
         let video = null;
@@ -915,6 +950,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
             context: contextName(),
             state: sanitizeLogValue(state),
             snapshot: diagnosticSnapshot(),
+            pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
             lastFailure: GM_getValue(FAILURE_KEY,null),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
@@ -946,6 +982,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
+        GM_deleteValue(PAGE_HEALTH_KEY);
         debugLog('info', 'logs-cleared');
         updateLogCount();
     }
@@ -968,6 +1005,24 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function installGlobalErrorLogging() {
+        recordPageHealth('boot');
+        setInterval(()=>recordPageHealth(),30000);
+        for (const name of ['pageshow','pagehide','online','offline']) {
+            window.addEventListener(name,event=>{
+                recordPageHealth(name);
+                debugLog('info','page-lifecycle',{type:name,persisted:Boolean(event.persisted),structure:pageStructureSummary()});
+            });
+        }
+        for (const name of ['freeze','resume','visibilitychange']) {
+            document.addEventListener(name,()=>recordPageHealth(name));
+        }
+        window.addEventListener('error',event=>{
+            const target=event.target;
+            if (!target || target===window) return;
+            let resource='';
+            try { const url=new URL(target.src || target.href,location.href); resource=url.origin+url.pathname; } catch (_) {}
+            debugLog('warn','resource-load-failed',{tag:target.tagName,resource,structure:pageStructureSummary()});
+        },true);
         document.addEventListener('visibilitychange',()=>debugLog('info','page-visibility-changed',{
             visibility:document.visibilityState,readyState:document.readyState
         }));
@@ -3635,7 +3690,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.33",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.34",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

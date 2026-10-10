@@ -23,7 +23,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,recordPageHealth,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
     if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
@@ -61,7 +61,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.33/);
+    assert.match(source,/@version\s+1\.5\.34/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -186,4 +186,20 @@ test('unbound player exposes downloadable bootstrap trace without raw launch cre
     assert.ok(data.trace.some(e=>e.event==='bootstrap-failed'));
     assert.ok(!JSON.stringify(data).includes('secret-course'));
     assert.ok(!JSON.stringify(data).includes('aaaaaaaa-aaaa'));
+});
+
+
+test('page health retains disappearance evidence after reload and bounds history',async()=>{
+    const values=new Map(),tab=tabState();let present=true;
+    const element={childElementCount:2,getBoundingClientRect:()=>({width:100,height:100})};
+    const first=await boot(values,tab,undefined,{body:element,querySelector:selector=>present && ['#app','#gbpx-helper-panel'].includes(selector)?element:null});
+    first.testApi.recordPageHealth('boot');present=false;
+    first.testApi.recordPageHealth('interval');
+    assert.ok(first.testApi.diagnosticBundle().pageHealth.lastAnomaly);
+    const next=await boot(values,tab);next.testApi.recordPageHealth('boot');
+    for(let i=0;i<50;i++)next.testApi.recordPageHealth();
+    const health=next.testApi.diagnosticBundle().pageHealth;
+    assert.equal(health.samples.length,40);
+    assert.equal(health.lastAnomaly.after.structure.panel.present,false);
+    assert.equal((await boot(values,tabState())).testApi.diagnosticBundle().pageHealth,null);
 });
