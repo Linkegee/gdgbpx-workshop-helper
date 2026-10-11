@@ -69,7 +69,7 @@ function boot(saved, values = new Map()) {
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
             writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,handlePlayerCloseRequest,closePlayerWindow,
             setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
-            recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
+            attemptPlayerStart, playerTick, recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
         installGlobalErrorLogging();`);
     vm.runInNewContext(instrumented, context);
@@ -522,4 +522,37 @@ test('wrong visible lesson identity pauses immediately rather than waiting for o
  assert.equal(h.api.getState().phase,'player-lesson-mismatch');
  assert.match(h.api.getState().message,/不一致/);
  assert.equal(h.api.getState().currentLessonKey,'class-1::测试课程');
+});
+
+function retryVideo(h) {
+    const video={currentTime:42,duration:100,currentSrc:'https://example.test/video',paused:true,ended:false,
+        readyState:1,networkState:2,loads:0,plays:0,load(){this.loads++;},pause(){this.paused=true;},
+        play(){this.plays++;return Promise.resolve();},getAttribute(){return '';},
+        addEventListener(){},removeEventListener(){}};
+    h.context.document=page('detail');h.api.setIdentity();h.api.setPlayer(video);
+    return video;
+}
+test('continue after exhausted media recovery actually permits a new bounded retry',()=>{
+    const h=boot(active),v=retryVideo(h);
+    for(let i=0;i<3;i++)h.api.recoverStalledMedia();
+    assert.equal(h.api.getState().status,'paused');
+    h.api.handlePanelAction('continue');h.api.applyPlayerState(h.api.getState());
+    h.api.recoverStalledMedia();
+    assert.equal(v.loads,3);assert.equal(h.api.getState().status,'running');
+    h.api.recoverStalledMedia();h.api.recoverStalledMedia();
+    assert.equal(v.loads,4);assert.equal(h.api.getState().status,'paused');
+});
+test('delayed play cannot resume after pause, course replacement, or account guard loss',()=>{
+    for(const change of [h=>h.api.handlePanelAction('pause'),
+        h=>h.values.set(STATE,{...h.api.getState(),currentLessonKey:'other'}),
+        h=>h.context.accountRuntime={...h.context.accountRuntime,guard:()=>false}]){
+        const h=boot(active),v=retryVideo(h);h.api.attemptPlayerStart(v);
+        const pending=[...h.timers.values()].filter(t=>t.delay===250);
+        assert.equal(pending.length,1);change(h);pending[0].fn();assert.equal(v.plays,0);
+    }
+});
+test('media that never started receives bounded in-place recovery without opening a tab',()=>{
+    const h=boot(active),v=retryVideo(h);
+    h.api.playerTick();h.advance(181000);h.api.playerTick();
+    assert.equal(v.loads,1);assert.equal(h.opened.length,0);
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.41
+// @version      1.5.42
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.41';
+    const VERSION = '1.5.42';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1637,7 +1637,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         if (action === 'continue') {
             if (state.status === 'stopped') { handlePanelAction('start'); return; }
             if (state.phase === 'player-stalled') {
-                updateState({status:'running',phase:'watching-video',message:'继续当前播放器'});
+                updateState({status:'running',phase:'watching-video',mediaRecoveryRetryId: Number(state.mediaRecoveryRetryId || 0) + 1,message:'继续当前播放器'});
                 return;
             }
             const retryPlayerOpen = state.phase === 'player-open-failed' && isDetailRoute();
@@ -3415,6 +3415,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     let mediaRecoveryAttempts = 0;
+    let mediaRecoveryRetryId = Number(getState().mediaRecoveryRetryId || 0);
     let mediaRecoveryListener = null;
     function recoverStalledMedia(state = getState()) {
         const video = playerVideo;
@@ -3452,7 +3453,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
         syncPlayerIdentityFromVisibleTitle(state);
         writePlayerHeartbeat();
-        dismissKnownContinuePrompt();
+        if (state.status === 'running' && !state.maintenance && !playerClosePending
+            && accountRuntime.guard() && playerLessonKey === state.currentLessonKey) dismissKnownContinuePrompt();
         const video = document.querySelector('video');
         if (video && video !== playerVideo) attachVideo(video);
 
@@ -3507,7 +3509,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
 
         const stallMs = Math.max(2, Number(state.settings.stallMinutes) || 3) * 60 * 1000;
-        const shouldWatchForStall = playerPlaybackStarted && (!playerVideo.paused || state.settings.autoResume);
+        const shouldWatchForStall = (playerPlaybackStarted || Boolean(source)) && (!playerVideo.paused || state.settings.autoResume);
         if (state.status === 'running' && shouldWatchForStall && !playerVideo.ended && Date.now() - lastPlayerProgressAt > stallMs) {
             debugLog('warn', 'player-stall-timeout', {
                 currentTime: current,
@@ -3656,7 +3658,9 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function recoverPausedVideoImmediately(video) {
         const state = getState();
-        if (!shouldRecoverPausedVideoImmediately(video, state, hasBlockingQuestion())) return false;
+        if (!canResumeCurrentVideo(video, state)) return false;
+        if (Date.now() - lastPlayAttemptAt < 3000) return false;
+        lastPlayAttemptAt = Date.now();
 
         debugLog('info', 'video-pause-immediate-recovery', {
             currentTime: Number(video.currentTime || 0),
@@ -3678,9 +3682,15 @@ function createSessionRequest(native,page,runtime,location,timers) {
         return true;
     }
 
+    function canResumeCurrentVideo(video, state = getState()) {
+        return video === playerVideo && accountRuntime.guard()
+            && Boolean(playerLessonKey) && playerLessonKey === state.currentLessonKey
+            && shouldRecoverPausedVideoImmediately(video, state, hasBlockingQuestion());
+    }
+
     function attemptPlayerStart(video) {
         const state = getState();
-        if (playerClosePending || state.status !== 'running' || state.maintenance || !state.settings.autoResume || video.ended || hasBlockingQuestion()) return;
+        if (!canResumeCurrentVideo(video, state)) return;
         const source = video.currentSrc || video.getAttribute('src') || '';
         const durationReady = Number.isFinite(video.duration) && video.duration > 0;
         const metadataReady = video.readyState >= 1 && durationReady;
@@ -3710,7 +3720,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         });
         if (bigPlayButton && isVisible(bigPlayButton)) bigPlayButton.click();
         setTimeout(() => {
-            if (video.paused && !video.ended && !hasBlockingQuestion()) {
+            if (video.paused && canResumeCurrentVideo(video)) {
                 video.play().catch((error) => {
                     debugLog('warn', 'video-play-rejected', { error });
                 });
@@ -3720,6 +3730,15 @@ function createSessionRequest(native,page,runtime,location,timers) {
 
     function applyPlayerState(state) {
         if (!playerVideo) return;
+        const retryId = Number(state.mediaRecoveryRetryId || 0);
+        if (retryId !== mediaRecoveryRetryId && state.status === 'running'
+            && playerLessonKey === state.currentLessonKey && accountRuntime.guard()) {
+            mediaRecoveryRetryId = retryId;
+            mediaRecoveryAttempts = 0;
+            lastPlayerProgressAt = Date.now();
+            lastPlayAttemptAt = 0;
+            debugLog('info', 'media-recovery-rearmed', { retryId });
+        }
         if (state.settings.muted) {
             playerVideo.muted = true;
             playerVideo.volume = 0;
@@ -3854,7 +3873,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.41",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.42",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
