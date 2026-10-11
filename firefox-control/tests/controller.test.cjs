@@ -84,3 +84,34 @@ test('captcha inspection returns actual tab/container evidence and rejects a cha
  f.api.tabs.sendMessage=async()=>{f.tabs.get(f.c.row(a.id).tabId).cookieStoreId='firefox-default';return {status:'awaiting-captcha'};};
  await assert.rejects(f.c.inspect(a.id),/容器/);
 });
+
+test('study reads only matched account container, leaves completed hours unknown, and never navigates',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
+ const workshop=await f.api.tabs.create({url:'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/mergeClass?classId=test',cookieStoreId:a.cookieStoreId});
+ await f.api.tabs.create({url:workshop.url,cookieStoreId:'other'});
+ f.api.tabs.sendMessage=async(id,msg)=>{
+  if(msg.channel==='gdgbpx-study-v1'){assert.equal(id,workshop.id);return {helperPresent:true,rows:[{completed:true,hourLabels:['学时：1.5']}]};}
+  return {status:'logged-in-unverified',identityKey:'a',name:'测试姓名',creditedHours:20};
+ };
+ const before=f.tabs.size,result=await f.c.study(a.id);
+ assert.equal(result.creditedHours,20);assert.equal(result.completedHours,null);assert.equal(result.tabs.length,1);assert.equal(f.tabs.size,before);
+ assert.equal(f.c.diagnostics().accounts[0].study.creditedHours,20);
+});
+
+test('study with mismatched identity exposes no account hours or workshop evidence',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',identityKey:'wrong',name:'别的姓名',creditedHours:50});
+ const result=await f.c.study(a.id);assert.equal(result.status,'identity-mismatch');assert.equal(result.creditedHours,null);assert.deepEqual(result.tabs,[]);
+});
+
+test('study discards tab data if container changes during read and rejects identity change after read',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
+ const tab=await f.api.tabs.create({url:'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',cookieStoreId:a.cookieStoreId});let homeReads=0;
+ f.api.tabs.sendMessage=async(id,msg)=>{
+  if(msg.channel==='gdgbpx-study-v1'){f.tabs.get(tab.id).cookieStoreId='other';return {rows:['DO_NOT_ACCEPT']};}
+  homeReads++;return {status:'logged-in-unverified',identityKey:'a',name:'测试姓名',creditedHours:2};
+ };
+ const result=await f.c.study(a.id);assert.ok(result.tabs[0].error);assert.doesNotMatch(JSON.stringify(result),/DO_NOT_ACCEPT/);
+ homeReads=0;f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',identityKey:++homeReads===1?'a':'b',name:'测试姓名',creditedHours:2});
+ await assert.rejects(f.c.study(a.id),/身份已变化/);assert.equal(f.c.studies.has(a.id),false);
+});

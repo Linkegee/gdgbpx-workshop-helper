@@ -3,8 +3,9 @@
 'use strict';
 const HOME='https://gbpx.gd.gov.cn/gdceportal/index.aspx';
 function isHome(url) {try {const u=new URL(url);return u.origin==='https://gbpx.gd.gov.cn' && u.pathname==='/gdceportal/index.aspx';}catch{return false;}}
+function isWorkshop(url) {try {const u=new URL(url);return u.origin==='https://gbpx.gd.gov.cn'&&u.pathname==='/gdceportal/dist/'&&/^#\/workshop\/workshopindex\/(mergeClass|classList)(?:\?|$)/.test(u.hash);}catch{return false;}}
 class Controller {
- constructor(api) {this.api=api;this.rows=[];this.busy=new Set();this.observations=new Map();this.events=[];this.writes=Promise.resolve();this.ready=this.restore();}
+ constructor(api) {this.api=api;this.rows=[];this.busy=new Set();this.observations=new Map();this.studies=new Map();this.events=[];this.writes=Promise.resolve();this.ready=this.restore();}
  async restore() {
   const saved=(await this.api.storage.local.get('accounts')).accounts;
   this.rows=Array.isArray(saved)?saved.filter(r=>r && typeof r.id==='string' && typeof r.username==='string' && typeof r.cookieStoreId==='string').map(r=>({id:r.id,username:r.username,label:String(r.label||''),cookieStoreId:r.cookieStoreId,tabId:Number.isInteger(r.tabId)?r.tabId:null,identityKey:typeof r.identityKey==='string'?r.identityKey:'',verifiedName:String(r.verifiedName||'')})):[];
@@ -74,6 +75,30 @@ class Controller {
   const observation={at:Date.now(),binding:result.binding,documentId:result.documentId||null,captchaFingerprint:result.captchaFingerprint||null,status:String(result.status||'unknown'),name:String(result.name||'').slice(0,80),creditedHours:typeof result.creditedHours==='number'?result.creditedHours:null,agreementAccepted:result.agreementAccepted===true,hintCode:['captcha','credentials','pending'].includes(result.hintCode)?result.hintCode:''};
   this.observations.set(id,observation);return this.classify(row,result);
  });}
+ async study(id) {return this.locked(id,async row=>{
+  this.studies.delete(id);
+  const home=await this.classify(row,await this.communicate(row,{action:'inspect'}));
+  const snapshot={at:Date.now(),status:home.status,name:home.name||'',creditedHours:null,completedHours:null,
+   source:'existing-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
+  if(home.status!=='already-logged-in'){this.studies.set(id,snapshot);return snapshot;}
+  snapshot.creditedHours=Number.isFinite(home.creditedHours)&&home.creditedHours>=0?home.creditedHours:null;
+  const tabs=(await this.api.tabs.query({cookieStoreId:row.cookieStoreId})).filter(t=>t.cookieStoreId===row.cookieStoreId&&isWorkshop(t.url));
+  snapshot.truncated=tabs.length>10;
+  for(const tab of tabs.slice(0,10)){
+   let timer;
+   const check=async()=>{const actual=await this.api.tabs.get(tab.id);if(actual.cookieStoreId!==row.cookieStoreId||actual.url!==tab.url)throw Error('changed');};
+   try{
+    const read=async()=>{await check();await this.api.tabs.executeScript(tab.id,{file:'study-content.js',frameId:0,runAt:'document_idle'});await check();
+     const evidence=await this.api.tabs.sendMessage(tab.id,{channel:'gdgbpx-study-v1',action:'inspect'},{frameId:0});await check();return evidence;};
+    const evidence=await Promise.race([read(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),5000);})]);
+    snapshot.tabs.push({tabId:tab.id,container:row.cookieStoreId,evidence});
+   }catch{snapshot.tabs.push({tabId:tab.id,error:'页面未就绪或容器/地址已改变'});}finally{clearTimeout(timer);}
+  }
+  // Recheck the homepage identity after collecting other tabs; fail closed on a session switch.
+  const latest=await this.communicate(row,{action:'inspect'});
+  if(latest.status!=='logged-in-unverified'||latest.identityKey!==home.identityKey)throw Error('身份已变化，请重新检查');
+  this.studies.set(id,snapshot);return snapshot;
+ });}
  async classify(row,result) {
   if(result.status!=='logged-in-unverified')return result;
   const key=result.identityKey;
@@ -104,9 +129,9 @@ class Controller {
  });}
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
- async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.2.3',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
+ async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);this.studies.delete(id);await this.persist();return {};});}
+ diagnostics() {return {version:'0.3.0',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
-if(typeof module!=='undefined')module.exports={Controller,isHome};
+if(typeof module!=='undefined')module.exports={Controller,isHome,isWorkshop};
 })(globalThis);

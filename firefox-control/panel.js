@@ -1,5 +1,43 @@
  'use strict';
 const $=s=>document.querySelector(s),views=new Map(),accounts=new Map();
+const studyViews=new Map();
+function addStudyView(account){
+ const row=document.createElement('tr');
+ for(let i=0;i<5;i++)row.append(document.createElement('td'));
+ row.children[0].textContent=(account.verifiedName||account.label||account.username)+' · '+account.cookieStoreId;
+ row.children[1].textContent='待读取';row.children[2].textContent='待核实';row.children[3].textContent='尚未读取';
+ const stamp=document.createElement('span'),button=document.createElement('button');button.className='secondary';button.textContent='读取本行';button.onclick=()=>readStudy(account.id);
+ row.children[4].append(stamp,button);studyViews.set(account.id,row);$('#study-accounts').append(row);
+}
+async function readStudy(id){
+ const row=studyViews.get(id);if(!row||row.dataset.busy)return;
+ row.dataset.busy='1';const button=row.querySelector('button');button.disabled=true;
+ row.children[1].textContent='读取中…';row.children[2].textContent='待核实';row.children[3].textContent='正在核验身份与容器';
+ try{
+  const value=await rpc('study',{id});
+  if(value.status!=='already-logged-in'){
+   row.children[1].textContent='身份待确认';row.children[3].textContent=messages[value.status]||'请先检查登录状态';return;
+  }
+  const account=accounts.get(id);row.children[0].textContent=(value.name||account.verifiedName||account.username)+' · '+account.cookieStoreId;
+  row.children[1].textContent=Number.isFinite(value.creditedHours)?value.creditedHours+' / 50':'未读到首页学时';
+  row.children[2].textContent='待核实';row.children[2].title=value.completedReason;
+  const tabs=value.tabs||[],readable=tabs.filter(t=>t.evidence),helpers=readable.filter(t=>t.evidence.helperPresent);
+  row.children[3].textContent=!tabs.length?'未打开专题页':tabs.some(t=>t.error)?'部分专题页无法读取':!helpers.length?'专题页未检测到助手':helpers.some(t=>t.evidence.helperRunning)?'助手运行中（未验证视频播放）':'助手未运行';
+  row.children[4].querySelector('span').textContent=new Date(value.at).toLocaleTimeString()+' · 页面读数 ';
+ }catch(error){row.children[1].textContent='读取失败';row.children[3].textContent=error.message;}
+ finally{delete row.dataset.busy;button.disabled=false;}
+}
+async function collectStudies(){
+ const ids=[...accounts.keys()];let next=0;
+ $('#study-notice').textContent='正在读取 '+ids.length+' 个账号…';
+ await Promise.all(Array.from({length:Math.min(3,ids.length)},async()=>{while(next<ids.length)await readStudy(ids[next++]);}));
+ $('#study-notice').textContent='本轮读取结束，请查看各行结果。未读取到的数据不会按 0 处理；不会刷新或启动课程。';
+}
+async function studyBatch(download=false){
+ const buttons=$('#study-dashboard').querySelectorAll('button');buttons.forEach(b=>b.disabled=true);
+ try{await collectStudies();if(download)await exportDiagnostics();}catch(error){$('#study-notice').textContent=error.message;}finally{buttons.forEach(b=>b.disabled=false);}
+}
+$('#study-all').onclick=()=>studyBatch();$('#study-export').onclick=()=>studyBatch(true);
 const messages={
  'already-logged-in':'已登录，与待登录账号匹配',
  'identity-confirmation':'已登录，但尚不能确认是否为待登录账号，请选择',
@@ -94,13 +132,14 @@ async function act(id,action){
    await rpc(action,{id});row.querySelector('.status').textContent='已准备，等待页面加载';delete row.dataset.challenge;
    row.querySelector('.code').value='';row.querySelector('.captcha').hidden=true;row.dataset.captchaFingerprint='';markSameImages();await poll(row,id);
   }else if(action==='inspect')await poll(row,id);
-  else if(action==='remove'){await rpc(action,{id});row.remove();views.delete(id);accounts.delete(id);markSameImages();$('#empty').hidden=views.size>0;}
+  else if(action==='remove'){await rpc(action,{id});row.remove();views.delete(id);accounts.delete(id);studyViews.get(id)?.remove();studyViews.delete(id);markSameImages();$('#empty').hidden=views.size>0;}
   else await rpc(action,{id});
  }catch(error){row.querySelector('.status').textContent=error.message;row.querySelector('.status').classList.add('error');row.querySelector('.binding-check').textContent='本次核验失败，实际容器未确认';delete row.dataset.challenge;row.dataset.captchaFingerprint='';row.querySelector('.code').value='';row.querySelector('.captcha').hidden=true;markSameImages();return 'failed';}
  finally{delete row.dataset.submitted;delete row.dataset.busy;row.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
 function addView(account){
  accounts.set(account.id,account);
+ addStudyView(account);
  const row=$('#row-template').content.firstElementChild.cloneNode(true);
  row.querySelector('.title').textContent=(account.label&&account.label!==account.username?account.label+' · ':'')+account.username;
  row.querySelector('.container-name').textContent=account.cookieStoreId;
@@ -175,9 +214,10 @@ $('#bulk-form').onsubmit=async event=>{
  try{entries=GanbuBulk.parseBulk($('#bulk-input').value);$('#bulk-input').value='';await importEntries(entries);}
  catch(error){notice(error.message);}finally{entries.forEach(e=>e.password='');button.disabled=false;}
 };
-$('#export').onclick=async()=>{
+async function exportDiagnostics(){
  try{const data=await rpc('diagnostics');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='gdgbpx-panel-diagnostics.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
  catch(error){notice(error.message);}
-};
+}
+$('#export').onclick=exportDiagnostics;
 (async()=>{try{for(const c of await rpc('containers')){const option=document.createElement('option');option.value=c.cookieStoreId;option.textContent=c.name;$('#container').append(option);}for(const row of await rpc('list'))addView(row);}catch(error){notice(error.message);}})();

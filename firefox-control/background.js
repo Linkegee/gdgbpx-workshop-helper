@@ -18,6 +18,7 @@ browser.runtime.onMessage.addListener((message,sender)=>{
     case 'add':value=await controller.add(message);break;
     case 'prepare':value=await controller.prepare(message.id);break;
     case 'inspect':value=await controller.inspect(message.id);break;
+    case 'study':value=await controller.study(message.id);break;
     case 'submit':value=await controller.submit(message.id,message);break;
     case 'confirmIdentity':value=await controller.confirmIdentity(message.id,message.identityKey);break;
     case 'switchLogin':value=await controller.switchLogin(message.id,message.identityKey,message.confirmed);break;
