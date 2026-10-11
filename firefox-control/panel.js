@@ -92,21 +92,50 @@ $('#add-form').onsubmit=async event=>{
  try {addView(await rpc('add',{username:$('#username').value,label:$('#label').value,cookieStoreId:$('#container').value}));$('#username').value='';$('#label').value='';$('#container').value='';notice('账号已添加，请填写本次密码并准备登录。');}
  catch(error){notice(error.message);}finally{button.disabled=false;}
 };
-$('#bulk-form').onsubmit=async event=>{
- event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;
- let entries=[];
+async function importEntries(entries){
+ const ids=[];let failed=0;
+ for(const entry of entries){
+  try{let account=[...accounts.values()].find(a=>a.username===entry.username);
+   if(!account){account=await rpc('add',{username:entry.username});addView(account);}
+   views.get(account.id).querySelector('.password').value=entry.password;ids.push(account.id);
+  }catch{failed++;}finally{entry.password='';}
+ }
+ notice('已添加 '+ids.length+' 个账号，正在集中获取验证码…');await pool(ids,'prepare');
+ notice('本轮准备完成，请查看各账号结果。填码后按 Enter 登录，也可以统一提交。'+(failed?'有 '+failed+' 行添加失败，请重新添加。':''));
+}
+function addEntry(){
+ if($('#entry-rows').children.length>=30){notice('每批最多30行');return;}
+ const row=document.createElement('div');row.className='entry-row';
+ const userLabel=document.createElement('label');userLabel.textContent='账号 / 手机号';
+ const user=document.createElement('input');user.className='entry-user';user.maxLength=100;user.autocomplete='off';userLabel.append(user);
+ const passLabel=document.createElement('label');passLabel.textContent='密码';
+ const pass=document.createElement('input');pass.className='entry-password';pass.type='password';pass.maxLength=512;pass.autocomplete='off';passLabel.append(pass);
+ const remove=document.createElement('button');remove.type='button';remove.className='secondary';remove.textContent='删除此行';
+ remove.onclick=()=>{pass.value='';row.remove();if(!$('#entry-rows').children.length)addEntry();};
+ row.append(userLabel,passLabel,remove);$('#entry-rows').append(row);
+}
+$('#add-entry').onclick=addEntry;
+for(let i=0;i<3;i++)addEntry();
+$('#entry-form').onsubmit=async event=>{
+ event.preventDefault();let entries=[];
  try{
-  entries=GanbuBulk.parseBulk($('#bulk-input').value);$('#bulk-input').value='';
-  const ids=[];let failed=0;
-  for(const entry of entries){
-   try{let account=[...accounts.values()].find(a=>a.username===entry.username);
-    if(!account){account=await rpc('add',{username:entry.username});addView(account);}
-    views.get(account.id).querySelector('.password').value=entry.password;ids.push(account.id);
-   }catch{failed++;}finally{entry.password='';}
+  const seen=new Set();
+  for(const [index,row] of [...$('#entry-rows').children].entries()){
+   const username=row.querySelector('.entry-user').value.trim(),password=row.querySelector('.entry-password').value;
+   if(!username&&!password)continue;
+   if(!username||!password)throw Error('第 '+(index+1)+' 行请填写完整账号和密码');
+   if(seen.has(username))throw Error('第 '+(index+1)+' 行账号重复');seen.add(username);entries.push({username,password});
   }
-  notice('已添加 '+ids.length+' 个账号，正在集中获取验证码…');await pool(ids,'prepare');
-  notice('验证码准备完成。逐行填码后按 Enter 登录，或填写全部后批量提交。'+(failed?'有 '+failed+' 行添加失败，请重新添加。':''));
- }catch(error){notice(error.message);}finally{entries.forEach(e=>e.password='');button.disabled=false;}
+  if(!entries.length)throw Error('请至少填写一个账号和密码');
+  $('#entry-fields').disabled=true;
+  $('#entry-rows').querySelectorAll('.entry-password').forEach(input=>input.value='');
+  await importEntries(entries);
+ }catch(error){notice(error.message);}finally{entries.forEach(e=>e.password='');$('#entry-fields').disabled=false;}
+};
+$('#bulk-form').onsubmit=async event=>{
+ event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;let entries=[];
+ try{entries=GanbuBulk.parseBulk($('#bulk-input').value);$('#bulk-input').value='';await importEntries(entries);}
+ catch(error){notice(error.message);}finally{entries.forEach(e=>e.password='');button.disabled=false;}
 };
 $('#export').onclick=async()=>{
  try{const data=await rpc('diagnostics');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});

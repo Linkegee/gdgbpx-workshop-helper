@@ -49,3 +49,28 @@ test('bulk form reuses saved accounts, fills passwords only locally and fetches 
  assert.doesNotMatch(JSON.stringify(requests),/SECRET/);
  assert.deepEqual([...doc.querySelectorAll('.password')].map(x=>x.value),['SECRET_A','SECRET_B']);dom.window.close();
 });
+
+test('separate entry rows validate before import, preserve password spaces and automatically allocate containers',async()=>{
+ const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../panel.html'),'utf8'),{runScripts:'outside-only',url:'https://extension-test.invalid/'});
+ const w=dom.window,doc=w.document,requests=[];w.setTimeout=()=>1;let next=0;
+ w.browser={runtime:{sendMessage:async msg=>{requests.push(msg);let value=[];
+  if(msg.action==='add')value={id:String(++next),username:msg.username,cookieStoreId:'auto-'+next};
+  if(msg.action==='prepare')value={};
+  if(msg.action==='inspect')value={status:'awaiting-captcha',challenge:msg.id,captchaImage:'data:image/png;base64,AAA',agreementAccepted:true};
+  return {ok:true,value};
+ }}};
+ w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));w.eval(fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8'));await flush();
+ assert.equal(doc.querySelectorAll('.entry-row').length,3);assert.equal(doc.querySelector('.entry-password').type,'password');
+ const rows=[...doc.querySelectorAll('.entry-row')];rows[0].querySelector('.entry-user').value='alice';rows[0].querySelector('.entry-password').value=' pass with spaces ';
+ rows[1].querySelector('.entry-user').value='alice';rows[1].querySelector('.entry-password').value='secret-b';
+ doc.querySelector('#entry-form').dispatchEvent(new w.Event('submit',{cancelable:true}));await flush();
+ assert.equal(requests.filter(x=>x.action==='add').length,0);assert.match(doc.querySelector('#notice').textContent,/重复/);
+ rows[1].querySelector('.entry-user').value='bob';
+ doc.querySelector('#entry-form').dispatchEvent(new w.Event('submit',{cancelable:true}));for(let i=0;i<5;i++)await flush();
+ const adds=requests.filter(x=>x.action==='add');assert.equal(adds.length,2);assert.ok(adds.every(x=>!x.cookieStoreId&&!x.password));
+ assert.equal(doc.querySelector('.account .password').value,' pass with spaces ');
+ assert.ok([...doc.querySelectorAll('.entry-password')].every(x=>x.value===''));
+ doc.querySelector('#add-entry').click();assert.equal(doc.querySelectorAll('.entry-row').length,4);
+ doc.querySelector('.entry-row button').click();assert.equal(doc.querySelectorAll('.entry-row').length,3);
+ dom.window.close();
+});

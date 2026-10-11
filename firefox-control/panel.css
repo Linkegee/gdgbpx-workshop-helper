@@ -3,3 +3,5 @@
 .agreement-label{display:flex;gap:8px;align-items:center;margin-top:18px}.agree{display:inline;width:auto;margin:0}
 
 #bulk-form{background:white;border:1px solid #dde4e8;border-radius:12px;padding:24px}textarea{display:block;width:100%;margin:12px 0;font:15px/1.6 monospace;padding:12px;border:1px solid #bac9d2;border-radius:6px}.identity-actions{padding:12px;background:#fff4df}.identity-actions[hidden]{display:none}summary{cursor:pointer;margin:16px 0}
+
+#entry-form{background:white;border:1px solid #dde4e8;border-radius:12px;padding:24px}#entry-fields{border:0;padding:0;margin:0}.entry-row{display:grid;grid-template-columns:1fr 1fr auto;align-items:end;gap:16px;margin:12px 0}.entry-row input{width:100%}.entry-buttons{display:flex;gap:12px;margin-top:20px}@media(max-width:650px){.entry-row{grid-template-columns:1fr 1fr}.entry-row button{grid-column:2;justify-self:end}}
