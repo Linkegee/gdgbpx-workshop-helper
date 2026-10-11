@@ -105,7 +105,7 @@ class Controller {
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.2.2',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.2.3',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome};

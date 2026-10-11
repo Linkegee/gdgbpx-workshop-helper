@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "干部学院账号面板（测试版）",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "按 Firefox 容器管理学院登录；本地集中填写验证码，不保存密码。",
   "browser_specific_settings": {
     "gecko": {

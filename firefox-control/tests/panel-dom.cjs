@@ -12,7 +12,7 @@ test('real panel DOM adds accounts, escapes labels, batches distinct challenges 
   if(msg.action==='prepare')value={tabId:Number(msg.id)};
   if(msg.action==='refresh')revisions[msg.id]=1;
   if(msg.action==='inspect')value={status:'awaiting-captcha',captchaImage:'data:image/png;base64,AAAA',captchaFingerprint:revisions[msg.id]?'changed':'common-image',challenge:'challenge-'+msg.id+(revisions[msg.id]?'-new':''),binding:{actualContainerId:'actual-'+msg.id,tabId:Number(msg.id),checkedAt:Date.now()},agreementAccepted:false};
-  if(msg.action==='submit')value={status:'submitted'};
+  if(msg.action==='submit')value={status:'already-logged-in'};
   return {ok:true,value};
  }}};
  w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));
@@ -81,4 +81,35 @@ test('separate entry rows validate before import, preserve password spaces and a
  doc.querySelector('#add-entry').click();assert.equal(doc.querySelectorAll('.entry-row').length,4);
  doc.querySelector('.entry-row button').click();assert.equal(doc.querySelectorAll('.entry-row').length,3);
  dom.window.close();
+});
+
+test('bulk submit reports missing passwords instead of silently skipping filled captcha rows',async()=>{
+ const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../panel.html'),'utf8'),{runScripts:'outside-only',url:'https://extension-test.invalid/'});
+ const w=dom.window,doc=w.document,calls=[];w.setTimeout=()=>1;
+ w.browser={runtime:{sendMessage:async msg=>{calls.push(msg);return {ok:true,value:msg.action==='list'?[{id:'a',username:'alice',cookieStoreId:'c1'}]:[]};}}};
+ w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));w.eval(fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8'));await flush();
+ doc.querySelector('.code').value='1234';doc.querySelector('#submit-codes').click();await flush();
+ assert.match(doc.querySelector('.status').textContent,/密码/);assert.match(doc.querySelector('#batch-result').textContent,/未提交.*1/);
+ assert.equal(calls.filter(c=>c.action==='submit').length,0);dom.window.close();
+});
+
+test('rejected login retains local password for a captcha retry and reports actual success after recheck',async()=>{
+ const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../panel.html'),'utf8'),{runScripts:'outside-only',url:'https://extension-test.invalid/'});
+ const w=dom.window,doc=w.document,requests=[],timers=[];let attempts=0;
+ w.setTimeout=(fn,ms)=>{timers.push({fn,ms});return timers.length;};w.clearTimeout=()=>{};
+ w.browser={runtime:{sendMessage:async msg=>{requests.push(msg);let value=[];
+  if(msg.action==='list')value=[{id:'a',username:'alice',cookieStoreId:'c1'}];
+  if(msg.action==='submit'){attempts++;value={status:'submitted'};}
+  if(msg.action==='inspect')value=attempts>=2?{status:'already-logged-in',identityKey:'key'}:{status:'awaiting-captcha',hintCode:attempts?'captcha':'',challenge:'challenge-'+attempts,captchaImage:'data:image/png;base64,AAA',agreementAccepted:true};
+  return {ok:true,value};
+ }}};
+ w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));w.eval(fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8'));await flush();
+ doc.querySelector('#inspect-all').click();await flush();
+ const password=doc.querySelector('.password'),code=doc.querySelector('.code');password.value='LOCAL_SECRET';code.value='first';
+ doc.querySelector('#submit-codes').click();for(let i=0;i<3;i++)await flush();
+ assert.equal(password.value,'LOCAL_SECRET');assert.equal(code.value,'');assert.match(doc.querySelector('.status').textContent,/登录失败.*验证码/);assert.match(doc.querySelector('#batch-result').textContent,/失败 1/);
+ code.value='second';doc.querySelector('#submit-codes').click();for(let i=0;i<3;i++)await flush();
+ assert.equal(attempts,2);assert.equal(password.value,'');assert.match(doc.querySelector('#batch-result').textContent,/登录成功 1/);
+ assert.equal(requests.filter(x=>x.action==='submit')[1].password,'LOCAL_SECRET');
+ password.value='EXPIRES';timers.find(t=>t.ms===600000).fn();assert.equal(password.value,'');dom.window.close();
 });
