@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.40';
+    const VERSION = '1.5.41';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -501,6 +501,40 @@
         });
     }
 
+    const TAB_EXIT_MARKER_KEY = 'gdgbpxTabExitMarkerV1';
+    function readExitMarker() {
+        try { return JSON.parse(window.sessionStorage.getItem(TAB_EXIT_MARKER_KEY) || 'null'); }
+        catch (_) { return null; }
+    }
+    function detectInterruptedDocument() {
+        if (window.top !== window || location.hostname !== MAIN_HOST) return;
+        const previous = readExitMarker(), now = Date.now();
+        if (!previous || previous.documentTag === diagnosticDocumentTag) return;
+        const gapMs = now - Number(previous.lastSeenAt || 0);
+        const interrupted = gapMs >= 0 && gapMs < 24 * 60 * 60 * 1000
+            && !previous.pagehideAt;
+        if (!interrupted) return;
+        const marker = {kind:'possible-abrupt-exit',previousDocumentTag:previous.documentTag,
+            lastSeenAt:previous.lastSeenAt,observedAt:now,gapMs,
+            lastPage:previous.page,lastPhase:previous.phase};
+        try { window.sessionStorage.setItem(TAB_EXIT_MARKER_KEY,JSON.stringify({
+            documentTag:diagnosticDocumentTag,lastSeenAt:now,pagehideAt:0,interruption:marker
+        })); } catch (_) {}
+        debugLog('warn','previous-document-ended-without-pagehide',marker);
+    }
+    function recordExitMarker(reason = 'alive') {
+        if (window.top !== window || location.hostname !== MAIN_HOST) return;
+        try {
+            const now=Date.now(), previous=readExitMarker();
+            const same=previous?.documentTag===diagnosticDocumentTag;
+            const marker={documentTag:diagnosticDocumentTag,lastSeenAt:now,
+                pagehideAt:reason==='pagehide' ? now : 0,
+                page:sanitizedUrl(),phase:getState().phase,
+                interruption:same ? previous.interruption || null : null};
+            window.sessionStorage.setItem(TAB_EXIT_MARKER_KEY,JSON.stringify(marker));
+        } catch (_) {}
+    }
+
     const PAGE_HEALTH_KEY = 'gdgbpx_page_health_v1';
     let lastHealthSampleAt = 0;
     function pageStructureSummary() {
@@ -603,6 +637,7 @@
             state: sanitizeLogValue(state),
             snapshot: diagnosticSnapshot(),
             pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
+            interruption: readExitMarker()?.interruption || null,
             lastFailure: GM_getValue(FAILURE_KEY,null),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
@@ -635,6 +670,7 @@
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
         GM_deleteValue(PAGE_HEALTH_KEY);
+        try { window.sessionStorage.removeItem(TAB_EXIT_MARKER_KEY); } catch (_) {}
         debugLog('info', 'logs-cleared');
         updateLogCount();
     }
@@ -657,6 +693,10 @@
     }
 
     function installGlobalErrorLogging() {
+        detectInterruptedDocument();
+        recordExitMarker('alive');
+        setInterval(()=>recordExitMarker('alive'),10000);
+        window.addEventListener('pagehide',()=>recordExitMarker('pagehide'));
         recordPageHealth('boot');
         startForegroundHealthCheck();
         document.addEventListener('visibilitychange',startForegroundHealthCheck);

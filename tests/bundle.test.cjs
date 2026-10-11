@@ -4,13 +4,14 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const crypto=require('node:crypto').webcrypto;
 const source=fs.readFileSync(path.join(__dirname,'../gdgbpx-workshop-helper.user.js'),'utf8');
 const STATE='gdgbpx_workshop_helper_state_v1';
-function tabState() {return {metadata:{},local:new Map()};}
+function tabState() {return {metadata:{},local:new Map(),session:new Map()};}
 async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',documentOverrides={},expectFailure=false) {
     const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,Blob,
         navigator:{userAgent:'test-firefox',onLine:true},
         setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},
         location:{href,hostname:url.hostname,hash:url.hash,assign(value){context.assigned=value;}},
         localStorage:{getItem:key=>tab.local.get(key)||null,setItem:(key,value)=>tab.local.set(key,value)},
+        sessionStorage:{getItem:key=>tab.session.get(key)||null,setItem:(key,value)=>tab.session.set(key,value)},
         document:{readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},createElement(){throw new Error('Bundle bootstrap failed');}},
         console:{log(){},warn(){},error(){}},
         GM_getTab:fn=>fn(structuredClone(tab.metadata)),GM_saveTab:obj=>{tab.metadata=structuredClone(obj);},
@@ -23,7 +24,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,setHeartbeat(value){GM_setValue(PLAYER_HEARTBEAT_KEY,value);},recordPageHealth,startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,recordExitMarker,recordPageHealth,detectInterruptedDocument,setHeartbeat(value){GM_setValue(PLAYER_HEARTBEAT_KEY,value);},startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
     if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
@@ -61,7 +62,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.40/);
+    assert.match(source,/@version\s+1\.5\.41/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -283,4 +284,22 @@ test('explicit start retries abandoned completion checks but preserves live play
  c.testApi.setHeartbeat({at:Date.now(),lessonKey:'old'});
  c.testApi.handlePanelAction('start');
  assert.equal(c.testApi.getState().phase,'refresh-delay');
+});
+
+
+test('recovered same-tab document retains last seen evidence when prior page lacked pagehide',async()=>{
+ const values=new Map(),tab=tabState();
+ const first=await boot(values,tab);first.testApi.recordExitMarker('alive');
+ const second=await boot(values,tab);second.testApi.detectInterruptedDocument();
+ const marker=second.testApi.diagnosticBundle().interruption;
+ assert.equal(marker?.kind,'possible-abrupt-exit');
+ assert.equal(marker?.previousDocumentTag,first.testApi.diagnosticBundle().documentTag);
+});
+test('normal pagehide and different tabs do not create an interruption marker',async()=>{
+ const values=new Map(),tab=tabState();
+ const first=await boot(values,tab);first.testApi.recordExitMarker('alive');first.testApi.recordExitMarker('pagehide');
+ const second=await boot(values,tab);second.testApi.detectInterruptedDocument();
+ assert.equal(second.testApi.diagnosticBundle().interruption,null);
+ const other=await boot(values,tabState());other.testApi.detectInterruptedDocument();
+ assert.equal(other.testApi.diagnosticBundle().interruption,null);
 });

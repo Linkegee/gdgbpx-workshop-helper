@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.40
+// @version      1.5.41
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.40';
+    const VERSION = '1.5.41';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -879,6 +879,40 @@ function createSessionRequest(native,page,runtime,location,timers) {
         });
     }
 
+    const TAB_EXIT_MARKER_KEY = 'gdgbpxTabExitMarkerV1';
+    function readExitMarker() {
+        try { return JSON.parse(window.sessionStorage.getItem(TAB_EXIT_MARKER_KEY) || 'null'); }
+        catch (_) { return null; }
+    }
+    function detectInterruptedDocument() {
+        if (window.top !== window || location.hostname !== MAIN_HOST) return;
+        const previous = readExitMarker(), now = Date.now();
+        if (!previous || previous.documentTag === diagnosticDocumentTag) return;
+        const gapMs = now - Number(previous.lastSeenAt || 0);
+        const interrupted = gapMs >= 0 && gapMs < 24 * 60 * 60 * 1000
+            && !previous.pagehideAt;
+        if (!interrupted) return;
+        const marker = {kind:'possible-abrupt-exit',previousDocumentTag:previous.documentTag,
+            lastSeenAt:previous.lastSeenAt,observedAt:now,gapMs,
+            lastPage:previous.page,lastPhase:previous.phase};
+        try { window.sessionStorage.setItem(TAB_EXIT_MARKER_KEY,JSON.stringify({
+            documentTag:diagnosticDocumentTag,lastSeenAt:now,pagehideAt:0,interruption:marker
+        })); } catch (_) {}
+        debugLog('warn','previous-document-ended-without-pagehide',marker);
+    }
+    function recordExitMarker(reason = 'alive') {
+        if (window.top !== window || location.hostname !== MAIN_HOST) return;
+        try {
+            const now=Date.now(), previous=readExitMarker();
+            const same=previous?.documentTag===diagnosticDocumentTag;
+            const marker={documentTag:diagnosticDocumentTag,lastSeenAt:now,
+                pagehideAt:reason==='pagehide' ? now : 0,
+                page:sanitizedUrl(),phase:getState().phase,
+                interruption:same ? previous.interruption || null : null};
+            window.sessionStorage.setItem(TAB_EXIT_MARKER_KEY,JSON.stringify(marker));
+        } catch (_) {}
+    }
+
     const PAGE_HEALTH_KEY = 'gdgbpx_page_health_v1';
     let lastHealthSampleAt = 0;
     function pageStructureSummary() {
@@ -981,6 +1015,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
             state: sanitizeLogValue(state),
             snapshot: diagnosticSnapshot(),
             pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
+            interruption: readExitMarker()?.interruption || null,
             lastFailure: GM_getValue(FAILURE_KEY,null),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
@@ -1013,6 +1048,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
         GM_deleteValue(PAGE_HEALTH_KEY);
+        try { window.sessionStorage.removeItem(TAB_EXIT_MARKER_KEY); } catch (_) {}
         debugLog('info', 'logs-cleared');
         updateLogCount();
     }
@@ -1035,6 +1071,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function installGlobalErrorLogging() {
+        detectInterruptedDocument();
+        recordExitMarker('alive');
+        setInterval(()=>recordExitMarker('alive'),10000);
+        window.addEventListener('pagehide',()=>recordExitMarker('pagehide'));
         recordPageHealth('boot');
         startForegroundHealthCheck();
         document.addEventListener('visibilitychange',startForegroundHealthCheck);
@@ -3814,7 +3854,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.40",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.41",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
