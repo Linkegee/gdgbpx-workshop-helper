@@ -5,3 +5,6 @@ __pycache__/
 venv/
 .env
 
+
+.panel-test-runtime/
+firefox-control-artifacts/
