@@ -42,7 +42,7 @@ async function inspect() {
 browser.runtime.onMessage.addListener((message,sender)=>{
  if(sender.id!==browser.runtime.id || message?.channel!=='gdgbpx-login-v1')return undefined;
  return Promise.resolve().then(async()=>{
-  if(message.action==='inspect')return inspect();
+  if(message.action==='inspect')return {...await inspect(),pageInfo:{readyState:document.readyState||'unknown',hidden:document.hidden===true,hasIdentityMarker:Boolean($('#ctl00_thetheUser')),hasHeader:Boolean($('#header_right_box')),hasLoginForm:Boolean($('#txtLoginName')&&$('#txtPassword')&&$('#txtValid'))}};
   if(message.action==='logout') {
    const current=await inspect();
    if(current.status!=='logged-in-unverified')return current;

@@ -1,6 +1,23 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {Controller,isHome}=require('../controller.js');
+test('new background homepage can initially be about:blank while loading',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'}),create=f.api.tabs.create;
+ f.api.tabs.create=async props=>{const tab=await create(props);tab.url='about:blank';tab.status='loading';setTimeout(()=>{tab.url=props.url;tab.status='complete';},20);return tab;};
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3});
+ assert.equal((await f.c.study(a.id)).creditedHours,3);
+});
+test('homepage DOM requiring more than four readiness attempts can load in background',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});let calls=0;
+ f.api.tabs.sendMessage=async()=>++calls<6?{status:'unsupported-page'}:{status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3};
+ assert.equal((await f.c.study(a.id)).creditedHours,3);
+});
+test('discarded homepage reloads in background but workshop is never reloaded',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);const home=f.tabs.get(f.c.row(a.id).tabId);home.discarded=true;let reloads=0;
+ f.api.tabs.reload=async id=>{assert.equal(id,home.id);home.discarded=false;reloads++;};
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3});
+ const result=await f.c.study(a.id);assert.equal(result.creditedHours,3);assert.equal(reloads,1);assert.equal(result.homeTrace[0].result,'reload-discarded-home');
+});
 test('hours read recovers after login tab navigates into workshop without disturbing that tab',async()=>{
  const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
  const formerHome=f.tabs.get(f.c.row(a.id).tabId);

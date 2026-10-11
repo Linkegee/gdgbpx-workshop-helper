@@ -57,18 +57,40 @@ class Controller {
   const tab=await this.ensureHome(row);
   this.observations.delete(id);this.log(id,'prepared');return {tabId:tab.id};
  });}
- async inspectStudyHome(row) {
-  // A newly created inactive tab can still be loading. Bound retries also cover delayed adapter injection.
-  for(let attempt=0;attempt<4;attempt++){
-   await this.checkedTab(row); // Never retry a container or navigation mismatch.
-   let result;
-   try{result=await this.communicate(row,{action:'inspect'});}catch(error){if(attempt===3)throw error;}
-   if(result && !['unsupported-page','captcha-loading'].includes(result.status))return result;
-   if(attempt===3)throw Error('study-home-not-ready');
-   await new Promise(resolve=>setTimeout(resolve,600));
+ async inspectStudyHome(row,trace=[]) {
+  const deadline=Date.now()+30000;let reloaded=false;
+  while(Date.now()<deadline){
+   const tab=await this.api.tabs.get(row.tabId);
+   const route=isHome(tab.url)?'home':tab.url==='about:blank'?'blank':isWorkshop(tab.url)?'workshop':'other';
+   const entry={at:Date.now(),tabId:tab.id,route,loading:tab.status==='loading',discarded:tab.discarded===true,sameContainer:tab.cookieStoreId===row.cookieStoreId};
+   trace.push(entry);
+   if(!entry.sameContainer){entry.result='container-changed';throw Error('study-container-changed');}
+   if(route!=='home'&&!(route==='blank'&&entry.loading)){entry.result='route-changed';throw Error('study-route-changed');}
+   if(entry.discarded){
+    if(reloaded){entry.result='still-discarded';throw Error('study-discarded');}
+    // Only reload a checked homepage, never a workshop/player or an arbitrary blank tab.
+    if(route!=='home')throw Error('study-discarded');
+    reloaded=true;entry.result='reload-discarded-home';await this.api.tabs.reload(tab.id);
+   }else if(route==='blank'||entry.loading){entry.result='waiting-load';}
+   else {
+    let result;
+    try{result=await this.communicate(row,{action:'inspect'},Math.min(4000,Math.max(1,deadline-Date.now())));}
+    catch(error){
+     entry.result=error.message==='page-timeout'?'adapter-timeout':'adapter-unavailable';
+     if(/permission|denied|Missing host/i.test(String(error.message)))entry.result='permission-denied';
+    }
+    if(result){
+     const accepted=['logged-in-unverified','awaiting-captcha','unsupported-page','captcha-loading','captcha-unavailable','page-operation-failed'];
+     entry.result=accepted.includes(result.status)?result.status:'unexpected-response';
+     if(result.pageInfo)entry.pageInfo=result.pageInfo;
+     if(['logged-in-unverified','awaiting-captcha','captcha-unavailable'].includes(result.status))return result;
+    }
+   }
+   await new Promise(resolve=>setTimeout(resolve,750));
   }
+  throw Error('study-home-timeout');
  }
- async communicate(row,payload) {
+ async communicate(row,payload,timeoutMs=12000) {
   const tab=await this.checkedTab(row);let timer;
   const operation=async()=>{
    if(payload.action==='inspect') {
@@ -81,7 +103,7 @@ class Controller {
    return {...result,binding:{tabId:actual.id,expectedContainerId:row.cookieStoreId,actualContainerId:actual.cookieStoreId,checkedAt:Date.now()}};
   };
   try{return await Promise.race([operation(),
-   new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('page-timeout')),12000);})]);}
+   new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('page-timeout')),timeoutMs);})]);}
   finally{clearTimeout(timer);}
  }
  async inspect(id) {return this.locked(id,async row=>{
@@ -92,13 +114,13 @@ class Controller {
  });}
  async study(id) {return this.locked(id,async row=>{
   this.studies.delete(id);
-  let stage='locate-home';
+  let stage='locate-home';const homeTrace=[];
   try {
   const homeTab=await this.ensureHome(row);
   stage='read-home';
-  const home=await this.classify(row,await this.inspectStudyHome(row));
+  const home=await this.classify(row,await this.inspectStudyHome(row,homeTrace));
   const snapshot={at:Date.now(),status:home.status,name:home.name||'',creditedHours:null,completedHours:null,
-   homeTabId:homeTab.id,source:'container-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
+   homeTabId:homeTab.id,homeTrace,source:'container-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
   if(home.status!=='already-logged-in'){this.studies.set(id,snapshot);return snapshot;}
   snapshot.creditedHours=Number.isFinite(home.creditedHours)&&home.creditedHours>=0?home.creditedHours:null;
   stage='read-workshops';
@@ -121,8 +143,9 @@ class Controller {
   this.studies.set(id,snapshot);return snapshot;
   }catch(error){
    const reasons={'locate-home':'无法在对应容器打开或定位首页','read-home':'首页未就绪、已离开或连接失效','read-workshops':'无法读取对应容器的专题页','verify-identity':'读取后身份或首页状态发生变化'};
-   this.studies.set(id,{at:Date.now(),status:'read-failed',stage,error:reasons[stage],creditedHours:null,completedHours:null,tabs:[]});
-   this.log(id,'study-failed-'+stage);throw Error(reasons[stage]);
+   const detail={'study-home-timeout':'后台首页等待超时，请下载诊断查看加载状态','study-container-changed':'后台首页容器已改变，已停止读取','study-route-changed':'后台首页跳转到其他页面，已停止读取','study-discarded':'后台首页仍处于休眠状态'}[error.message]||reasons[stage];
+   this.studies.set(id,{at:Date.now(),status:'read-failed',stage,error:detail,homeTrace,creditedHours:null,completedHours:null,tabs:[]});
+   this.log(id,'study-failed-'+stage);throw Error(detail);
   }
  });}
  async classify(row,result) {
@@ -156,7 +179,7 @@ class Controller {
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);this.studies.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.3.1',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.3.2',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome,isWorkshop};
