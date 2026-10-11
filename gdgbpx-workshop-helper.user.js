@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.39
+// @version      1.5.40
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.39';
+    const VERSION = '1.5.40';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -2935,6 +2935,20 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
         if (event.playerSessionId && event.playerSessionId === state.retiredMaintenanceSessionId) return;
         debugLog('info', 'player-event-received', { event, status: state.status, phase: state.phase });
+        if (event.type === 'player-identity-mismatch'
+            && event.expectedLessonKey === state.currentLessonKey
+            && event.detectedLessonKey && event.detectedLessonKey !== state.currentLessonKey
+            && state.status === 'running' && ['opening-video','watching-video'].includes(state.phase)) {
+            updateState({status:'paused',phase:'player-lesson-mismatch',
+                message:'播放器显示的课程与当前课程不一致，已暂停；请关闭该播放器并重新检查'});
+            debugLog('error','active-player-lesson-mismatch',{
+                expectedLessonKey:state.currentLessonKey,detectedLessonKey:event.detectedLessonKey});
+            if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
+                try { fallbackPlayerTab.close(); }
+                catch (error) { debugLog('warn','mismatched-player-close-failed',{error}); }
+            }
+            return;
+        }
 
         const completedEventLesson = Boolean(event.lessonKey)
             && state.serverCompletedLessonKeys.includes(event.lessonKey);
@@ -3800,7 +3814,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.39",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.40",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

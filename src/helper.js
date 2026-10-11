@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.39';
+    const VERSION = '1.5.40';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -2557,6 +2557,20 @@
         }
         if (event.playerSessionId && event.playerSessionId === state.retiredMaintenanceSessionId) return;
         debugLog('info', 'player-event-received', { event, status: state.status, phase: state.phase });
+        if (event.type === 'player-identity-mismatch'
+            && event.expectedLessonKey === state.currentLessonKey
+            && event.detectedLessonKey && event.detectedLessonKey !== state.currentLessonKey
+            && state.status === 'running' && ['opening-video','watching-video'].includes(state.phase)) {
+            updateState({status:'paused',phase:'player-lesson-mismatch',
+                message:'播放器显示的课程与当前课程不一致，已暂停；请关闭该播放器并重新检查'});
+            debugLog('error','active-player-lesson-mismatch',{
+                expectedLessonKey:state.currentLessonKey,detectedLessonKey:event.detectedLessonKey});
+            if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
+                try { fallbackPlayerTab.close(); }
+                catch (error) { debugLog('warn','mismatched-player-close-failed',{error}); }
+            }
+            return;
+        }
 
         const completedEventLesson = Boolean(event.lessonKey)
             && state.serverCompletedLessonKeys.includes(event.lessonKey);

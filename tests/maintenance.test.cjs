@@ -512,3 +512,14 @@ test('media recovery retries the same element twice then pauses, never opens ano
  assert.equal(loads,2);assert.equal(h.api.getState().phase,'player-stalled');assert.equal(paused,1);assert.equal(h.opened.length,0);
  video.currentTime=0;listener();assert.equal(video.currentTime,0,'late metadata cannot resume paused task');
 });
+
+
+test('wrong visible lesson identity pauses immediately rather than waiting for open timeout',()=>{
+ const h=boot({...active,phase:'opening-video',currentLessonTitle:'测试课程',currentLessonKey:'class-1::测试课程'});
+ h.api.handlePlayerEvent({id:'mismatch-1',type:'player-identity-mismatch',lessonKey:'class-1::错误课程',
+   expectedLessonKey:'class-1::测试课程',detectedLessonKey:'class-1::错误课程',playerSessionId:'player-1',at:h.now()});
+ assert.equal(h.api.getState().status,'paused');
+ assert.equal(h.api.getState().phase,'player-lesson-mismatch');
+ assert.match(h.api.getState().message,/不一致/);
+ assert.equal(h.api.getState().currentLessonKey,'class-1::测试课程');
+});
