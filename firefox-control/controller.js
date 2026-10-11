@@ -7,9 +7,9 @@ class Controller {
  constructor(api) {this.api=api;this.rows=[];this.busy=new Set();this.observations=new Map();this.events=[];this.writes=Promise.resolve();this.ready=this.restore();}
  async restore() {
   const saved=(await this.api.storage.local.get('accounts')).accounts;
-  this.rows=Array.isArray(saved)?saved.filter(r=>r && typeof r.id==='string' && typeof r.username==='string' && typeof r.cookieStoreId==='string').map(r=>({id:r.id,username:r.username,label:String(r.label||''),cookieStoreId:r.cookieStoreId,tabId:Number.isInteger(r.tabId)?r.tabId:null})):[];
+  this.rows=Array.isArray(saved)?saved.filter(r=>r && typeof r.id==='string' && typeof r.username==='string' && typeof r.cookieStoreId==='string').map(r=>({id:r.id,username:r.username,label:String(r.label||''),cookieStoreId:r.cookieStoreId,tabId:Number.isInteger(r.tabId)?r.tabId:null,identityKey:typeof r.identityKey==='string'?r.identityKey:'',verifiedName:String(r.verifiedName||'')})):[];
  }
- async persist() {this.writes=this.writes.catch(()=>{}).then(()=>this.api.storage.local.set({accounts:this.rows.map(r=>({id:r.id,username:r.username,label:r.label,cookieStoreId:r.cookieStoreId,tabId:r.tabId}))}));await this.writes;}
+ async persist() {this.writes=this.writes.catch(()=>{}).then(()=>this.api.storage.local.set({accounts:this.rows.map(r=>({id:r.id,username:r.username,label:r.label,cookieStoreId:r.cookieStoreId,tabId:r.tabId,identityKey:r.identityKey||'',verifiedName:r.verifiedName||''}))}));await this.writes;}
  row(id) {const r=this.rows.find(r=>r.id===id);if(!r)throw Error('账号不存在');return r;}
  log(id,event) {this.events.push({at:Date.now(),id,event});this.events=this.events.slice(-100);}
  async list() {await this.ready;return this.rows.map(r=>({...r,observation:this.observations.get(r.id)||null,busy:this.busy.has(r.id)}));}
@@ -69,18 +69,40 @@ class Controller {
   const result=await this.communicate(row,{action:'inspect'});
   // Do not retain the CAPTCHA bitmap or any credentials in the background.
   const observation={at:Date.now(),status:String(result.status||'unknown'),name:String(result.name||'').slice(0,80),creditedHours:typeof result.creditedHours==='number'?result.creditedHours:null,agreementAccepted:result.agreementAccepted===true,hintCode:['captcha','credentials','pending'].includes(result.hintCode)?result.hintCode:''};
-  this.observations.set(id,observation);return result;
+  this.observations.set(id,observation);return this.classify(row,result);
+ });}
+ async classify(row,result) {
+  if(result.status!=='logged-in-unverified')return result;
+  const key=result.identityKey;
+  const other=this.rows.find(r=>r.id!==row.id && r.identityKey && r.identityKey===key);
+  let status='identity-confirmation';
+  if(key && !other && ((row.identityKey && row.identityKey===key)
+    || (!row.identityKey && result.name && result.name===row.username))) {
+   row.identityKey=key;row.verifiedName=result.name||'';await this.persist();
+   status='already-logged-in';
+  } else if(other || (row.identityKey && key!==row.identityKey) || (result.name && /^[\p{Script=Han}·]{2,20}$/u.test(row.username) && result.name!==row.username))status='identity-mismatch';
+  return {...result,status,expectedUsername:row.username};
+ }
+ async confirmIdentity(id,key) {return this.locked(id,async row=>{
+  const current=await this.communicate(row,{action:'inspect'});
+  if(!key || current.identityKey!==key || current.status!=='logged-in-unverified')throw Error('身份已变化，请重新检查');
+  if(this.rows.some(r=>r.id!==id && r.identityKey===key))throw Error('此身份已绑定其他账号');
+  row.identityKey=key;row.verifiedName=current.name||'';await this.persist();return this.classify(row,current);
+ });}
+ async switchLogin(id,key,confirmed) {return this.locked(id,async row=>{
+  if(confirmed!==true || !key)throw Error('需要确认切换账号');
+  const result=await this.communicate(row,{action:'logout',identityKey:key});this.log(id,'switch-requested');return result;
  });}
  async submit(id,{password,captcha,challenge,agree}) {return this.locked(id,async row=>{
   if(typeof password!=='string'||!password||password.length>512)throw Error('请输入密码');
   if(typeof captcha!=='string'||!captcha.trim()||captcha.length>20)throw Error('请输入本账号的验证码');
   const result=await this.communicate(row,{action:'submit',username:row.username,password,captcha:captcha.trim(),challenge,agree:agree===true});
-  this.log(id,result.status==='submitted'?'submit-dispatched':'submit-blocked');return result;
+  this.log(id,result.status==='submitted'?'submit-dispatched':'submit-blocked');return this.classify(row,result);
  });}
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.1.0',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.2.0',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome};

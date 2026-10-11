@@ -14,6 +14,7 @@ test('real panel DOM adds accounts, escapes labels, batches distinct challenges 
   if(msg.action==='submit')value={status:'submitted'};
   return {ok:true,value};
  }}};
+ w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));
  w.eval(fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8'));await flush();
  for(const username of ['alice','bob']){doc.querySelector('#username').value=username;doc.querySelector('#label').value='<img src=x onerror=alert(1)>';doc.querySelector('#add-form').dispatchEvent(new w.Event('submit',{cancelable:true}));await flush();}
  assert.equal(doc.querySelectorAll('.account').length,2);assert.equal(doc.querySelectorAll('.title img').length,0);
@@ -26,4 +27,25 @@ test('real panel DOM adds accounts, escapes labels, batches distinct challenges 
  submits.forEach((m,i)=>{assert.equal(m.id,String(i+1));assert.equal(m.password,'SECRET-'+i);assert.equal(m.challenge,'challenge-'+(i+1));assert.equal(m.agree,true);});
  cards.forEach(c=>{assert.equal(c.querySelector('.password').value,'');assert.equal(c.querySelector('.code').value,'');});
  dom.window.close();
+});
+
+test('bulk form reuses saved accounts, fills passwords only locally and fetches all challenges',async()=>{
+ const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../panel.html'),'utf8'),{runScripts:'outside-only',url:'https://extension-test.invalid/'});
+ const w=dom.window,doc=w.document,requests=[];w.setTimeout=()=>1;
+ const existing={id:'old',username:'alice',cookieStoreId:'c1'};
+ w.browser={runtime:{sendMessage:async msg=>{requests.push(msg);let value;
+  if(msg.action==='containers')value=[];if(msg.action==='list')value=[existing];
+  if(msg.action==='add')value={id:'new',username:msg.username,cookieStoreId:'c2'};
+  if(msg.action==='prepare')value={};
+  if(msg.action==='inspect')value={status:'awaiting-captcha',challenge:msg.id,captchaImage:'data:image/png;base64,AAA',agreementAccepted:true};
+  return {ok:true,value};
+ }}};
+ w.eval(fs.readFileSync(path.join(__dirname,'../bulk.js'),'utf8'));w.eval(fs.readFileSync(path.join(__dirname,'../panel.js'),'utf8'));await flush();
+ doc.querySelector('#bulk-input').value='alice\tSECRET_A\nbob\tSECRET_B';
+ doc.querySelector('#bulk-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
+ for(let i=0;i<5;i++)await flush();
+ assert.equal(doc.querySelector('#bulk-input').value,'');assert.equal(requests.filter(x=>x.action==='add').length,1);
+ assert.equal(requests.filter(x=>x.action==='prepare').length,2);assert.equal(requests.filter(x=>x.action==='inspect').length,2);
+ assert.doesNotMatch(JSON.stringify(requests),/SECRET/);
+ assert.deepEqual([...doc.querySelectorAll('.password')].map(x=>x.value),['SECRET_A','SECRET_B']);dom.window.close();
 });

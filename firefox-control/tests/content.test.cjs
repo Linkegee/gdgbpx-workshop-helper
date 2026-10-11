@@ -6,7 +6,7 @@ function fixture(){
  '#ctl00_thetheUser':{get textContent(){return logged;}},'#header_right_box':{innerText:'测试姓名 已关联微信 累计学时:2.0/50.0'},'#hintMsg':{innerText:''},
  '#imgValid':{complete:true,naturalWidth:80,naturalHeight:30,currentSrc:'https://gbpx.gd.gov.cn/VerifyChar.aspx?id=1',click(){this.currentSrc+='x';imageData+='B';}},
  '#user-login-form .loginBtnBox[onclick*="lnkbtnLogin"]':{click(){clicks++;received={username:nodes['#txtLoginName'].value,password:nodes['#txtPassword'].value,code:nodes['#txtValid'].value,agree:nodes['#cbAgree'].checked};}}};
- const ctx={HTMLInputElement:Input,Event:class{},crypto:webcrypto,Date,document:{querySelector:s=>nodes[s]||null,createElement:()=>({getContext:()=>({drawImage(){}}),toDataURL:()=>imageData})},browser:{runtime:{id:'test',onMessage:{addListener:fn=>listener=fn}}}};
+ const ctx={TextEncoder,HTMLInputElement:Input,Event:class{},crypto:webcrypto,Date,document:{querySelector:s=>nodes[s]||null,createElement:()=>({getContext:()=>({drawImage(){}}),toDataURL:()=>imageData})},browser:{runtime:{id:'test',onMessage:{addListener:fn=>listener=fn}}}};
  vm.runInNewContext(fs.readFileSync(require.resolve('../login-content.js'),'utf8'),ctx);
  return {nodes,send:(action,data={},sender={id:'test'})=>listener({channel:'gdgbpx-login-v1',action,...data},sender),clicks:()=>clicks,received:()=>received,login:()=>logged='opaque-id'};
 }
@@ -31,4 +31,11 @@ test('existing login is reported for verification without overwriting its sessio
 test('foreign sender cannot command content script; no image fetch is used to mutate captcha',async()=>{
  const f=fixture();assert.equal(f.send('inspect',{}, {id:'foreign'}),undefined);
  const a=await f.send('inspect'),b=await f.send('inspect');assert.equal(a.challenge,b.challenge);
+});
+
+test('logout requires matching identity and native logout button; mismatched confirmation cannot act',async()=>{
+ const f=fixture();f.login();const current=await f.send('inspect');let exits=0;
+ f.nodes['#header_right_box [onclick*="logOut"]']={click(){exits++;}};
+ assert.equal((await f.send('logout',{identityKey:'stale'})).status,'identity-changed');assert.equal(exits,0);
+ assert.equal((await f.send('logout',{identityKey:current.identityKey})).status,'logging-out');assert.equal(exits,1);
 });

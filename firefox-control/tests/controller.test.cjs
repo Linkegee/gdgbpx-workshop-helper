@@ -56,3 +56,21 @@ test('inspection attaches adapter to an old homepage without reloading or openin
  f.api.tabs.executeScript=async(id,options)=>{assert.equal(id,f.c.row(a.id).tabId);assert.equal(options.file,'login-content.js');assert.equal(options.frameId,0);injected++;};
  await f.c.inspect(a.id);assert.equal(injected,1);assert.equal(f.tabs.size,1);
 });
+
+test('matching name is already logged in; unknown numeric login needs confirmation; changed identity prompts switch',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'测试姓名',identityKey:'key-a'});
+ assert.equal((await f.c.inspect(a.id)).status,'already-logged-in');
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'另一姓名',identityKey:'key-b'});
+ assert.equal((await f.c.inspect(a.id)).status,'identity-mismatch');assert.equal(f.c.row(a.id).identityKey,'key-a');
+ const b=await f.c.add({username:'123456'});await f.c.prepare(b.id);
+ assert.equal((await f.c.inspect(b.id)).status,'identity-confirmation');
+ await assert.rejects(f.c.confirmIdentity(b.id,'stale'),/身份已变化/);
+ assert.equal((await f.c.confirmIdentity(b.id,'key-b')).status,'already-logged-in');
+ const restored=new Controller(f.api);await restored.ready;assert.equal(restored.row(b.id).identityKey,'key-b');
+});
+test('switch account requires explicit confirmation and forwards fingerprint without passwords',async()=>{
+ const f=fixture(),a=await f.c.add({username:'a'});await f.c.prepare(a.id);
+ await assert.rejects(f.c.switchLogin(a.id,'key',false),/确认/);assert.equal(f.messages.length,0);
+ await f.c.switchLogin(a.id,'key',true);assert.equal(f.messages[0].msg.action,'logout');assert.equal(f.messages[0].msg.identityKey,'key');
+});

@@ -9,13 +9,15 @@ function fill(element,value) {
  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
  setter.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));element.dispatchEvent(new Event('change',{bubbles:true}));
 }
-function inspect() {
+async function inspect() {
  if(loggedIn()) {
   challenge=null;
   const header=($('#header_right_box')?.innerText||'').replace(/\s+/g,' ').trim().slice(0,500);
   const hours=header.match(/累计学时\s*[:：]\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/);
   const name=header.match(/([\p{Script=Han}·]{2,20})\s*(?:已关联微信|关联微信|退出登录)/u);
-  return {status:'logged-in-unverified',name:name?.[1]||'',creditedHours:hours?Number(hours[1]):null,header};
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode($('#ctl00_thetheUser').textContent.trim()));
+  const identityKey=Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
+  return {status:'logged-in-unverified',identityKey,name:name?.[1]||'',creditedHours:hours?Number(hours[1]):null,header};
  }
  const image=$('#imgValid'),user=$('#txtLoginName'),password=$('#txtPassword'),code=$('#txtValid');
  if(!user||!password||!code||!image)return {status:'unsupported-page'};
@@ -35,8 +37,16 @@ function inspect() {
 }
 browser.runtime.onMessage.addListener((message,sender)=>{
  if(sender.id!==browser.runtime.id || message?.channel!=='gdgbpx-login-v1')return undefined;
- return Promise.resolve().then(()=>{
+ return Promise.resolve().then(async()=>{
   if(message.action==='inspect')return inspect();
+  if(message.action==='logout') {
+   const current=await inspect();
+   if(current.status!=='logged-in-unverified')return current;
+   if(!message.identityKey || current.identityKey!==message.identityKey)return {status:'identity-changed'};
+   const button=$('#header_right_box [onclick*="logOut"]') || $('a[href*="javascript:logOut("]');
+   if(!button)return {status:'logout-manual-required'};
+   challenge=null;button.click();return {status:'logging-out'};
+  }
   if(message.action==='refresh') {
    if(loggedIn())return inspect();
    challenge=null;$('#imgValid')?.click();return {status:'captcha-loading'};
@@ -44,7 +54,7 @@ browser.runtime.onMessage.addListener((message,sender)=>{
   if(message.action!=='submit')return {status:'unsupported-action'};
   if(loggedIn())return inspect();
   if(Date.now()-submittedAt<15000)return {status:'submission-pending'};
-  const current=inspect();
+  const current=await inspect();
   if(current.status!=='awaiting-captcha')return current;
   if(!message.challenge||current.challenge!==message.challenge)return {status:'captcha-changed'};
   const agreement=$('#cbAgree');
