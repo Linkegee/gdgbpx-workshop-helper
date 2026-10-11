@@ -1,3 +1,12 @@
+# 0.3.3 读取学时不新开标签页
+
+用户0.3.2真实诊断确认后台首页能读取66.6/18.6学时，但为此保留额外首页不符合需求。本版study不再调用ensureHome：优先读取同容器已有未休眠首页；没有时选择已有未休眠专题页，用Firefox MV2 content.fetch按页面上下文向固定学院首页发GET请求，credentials:include、cache:no-store、redirect:error、10秒中止。返回HTML在脱离页面的DOMParser文档里解析，不执行脚本、不创建iframe或标签、不改动专题/播放器。内容脚本只返回姓名/学时/身份摘要，仍与已绑定身份及读取前后容器核验。没有可读学院页或接口不可用时提示原因，绝不退回扩展全局fetch或新开标签。
+
+原来的准备登录功能仍可按用户点击创建登录页。旧版采集页未保存所有权，无法区分用户自建首页，因此不自动批量关闭旧页。新旧分界是本版采集本身不创建页。
+
+40项本地测试通过；页面请求分支真实Firefox尚待验证。官方接口依据：https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Content_scripts#xhr_and_fetch 。只有专题列表的总学时尚不能计算已完成学时；自动50停止仍未启用。
+
+---
 # 0.3.2 后台首页加载等待与诊断
 
 用户0.3.1诊断显示两个账号曾成功读到首页姓名/学时，但study失败在read-home；没有底层状态，不能断定现场根因。新增两个先失败的Controller回归：tabs.create返回后about:blank/loading立即被checkedTab拒绝，以及DOM超过4次尝试才就绪（旧版约1.8秒即放弃）。现等待浏览器加载结束及适配器响应，读取预算30秒、单次消息最多4秒；同容器首页被discard时只尝试一次后台reload。不切换前台、不刷新专题或视频，容器或非加载中的地址变化立即停止。

@@ -1,14 +1,25 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {Controller,isHome}=require('../controller.js');
+test('hours collection never creates tabs even when no academy page is open',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});
+ f.api.tabs.create=async()=>{throw Error('SHOULD_NOT_CREATE');};
+ await assert.rejects(f.c.study(a.id),/没有可读取的学院页面/);assert.equal(f.tabs.size,0);
+});
+test('workshop-only account request rejects a different fetched identity',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});f.c.row(a.id).identityKey='expected';
+ await f.api.tabs.create({url:'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',cookieStoreId:a.cookieStoreId});
+ f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'另一姓名',identityKey:'other',creditedHours:99});
+ const result=await f.c.study(a.id);assert.equal(result.status,'identity-mismatch');assert.equal(result.creditedHours,null);assert.equal(f.tabs.size,1);
+});
 test('new background homepage can initially be about:blank while loading',async()=>{
  const f=fixture(),a=await f.c.add({username:'测试姓名'}),create=f.api.tabs.create;
  f.api.tabs.create=async props=>{const tab=await create(props);tab.url='about:blank';tab.status='loading';setTimeout(()=>{tab.url=props.url;tab.status='complete';},20);return tab;};
  f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3});
- assert.equal((await f.c.study(a.id)).creditedHours,3);
+ await f.c.prepare(a.id);assert.equal((await f.c.inspectStudyHome(f.c.row(a.id))).creditedHours,3);
 });
 test('homepage DOM requiring more than four readiness attempts can load in background',async()=>{
- const f=fixture(),a=await f.c.add({username:'测试姓名'});let calls=0;
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);let calls=0;
  f.api.tabs.sendMessage=async()=>++calls<6?{status:'unsupported-page'}:{status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3};
  assert.equal((await f.c.study(a.id)).creditedHours,3);
 });
@@ -16,7 +27,7 @@ test('discarded homepage reloads in background but workshop is never reloaded',a
  const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);const home=f.tabs.get(f.c.row(a.id).tabId);home.discarded=true;let reloads=0;
  f.api.tabs.reload=async id=>{assert.equal(id,home.id);home.discarded=false;reloads++;};
  f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3});
- const result=await f.c.study(a.id);assert.equal(result.creditedHours,3);assert.equal(reloads,1);assert.equal(result.homeTrace[0].result,'reload-discarded-home');
+ const trace=[];const result=await f.c.inspectStudyHome(f.c.row(a.id),trace);assert.equal(result.creditedHours,3);assert.equal(reloads,1);assert.equal(trace[0].result,'reload-discarded-home');
 });
 test('hours read recovers after login tab navigates into workshop without disturbing that tab',async()=>{
  const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
@@ -25,7 +36,7 @@ test('hours read recovers after login tab navigates into workshop without distur
  f.api.tabs.sendMessage=async(id,msg)=>msg.channel==='gdgbpx-study-v1'?{rows:[]}:{status:'logged-in-unverified',identityKey:'a',name:'测试姓名',creditedHours:18.6};
  const result=await f.c.study(a.id);
  assert.equal(result.creditedHours,18.6);assert.match(formerHome.url,/mergeClass/);
- const home=f.tabs.get(f.c.row(a.id).tabId);assert.notEqual(home.id,formerHome.id);assert.equal(home.active,false);assert.equal(home.cookieStoreId,a.cookieStoreId);
+ const home=f.tabs.get(f.c.row(a.id).tabId);assert.equal(home.id,formerHome.id);assert.equal(f.tabs.size,1);assert.equal(home.active,false);assert.equal(home.cookieStoreId,a.cookieStoreId);
  const count=f.tabs.size;await f.c.study(a.id);assert.equal(f.tabs.size,count);
 });
 function fixture(){
@@ -152,13 +163,13 @@ test('hours read reuses another homepage after bound tab closes and never uses a
 });
 
 test('hours read waits for a newly created homepage adapter without opening duplicate tabs',async()=>{
- const f=fixture(),a=await f.c.add({username:'测试姓名'});let reads=0;
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);let reads=0;
  f.api.tabs.sendMessage=async()=>{if(++reads===1)throw Error('no receiver');return {status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3};};
  assert.equal((await f.c.study(a.id)).creditedHours,3);assert.equal(f.tabs.size,1);
 });
 
 test('study failures retain redacted stage diagnostics without raw browser errors',async()=>{
- const f=fixture(),a=await f.c.add({username:'测试姓名'});f.api.contextualIdentities.get=async()=>{throw Error('SECRET');};
- await assert.rejects(f.c.study(a.id),/对应容器/);
- const data=f.c.diagnostics();assert.equal(data.accounts[0].study.stage,'locate-home');assert.doesNotMatch(JSON.stringify(data),/SECRET/);
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});f.api.tabs.query=async()=>{throw Error('SECRET');};
+ await assert.rejects(f.c.study(a.id),/首页/);
+ const data=f.c.diagnostics();assert.equal(data.accounts[0].study.stage,'read-home');assert.doesNotMatch(JSON.stringify(data),/SECRET/);
 });

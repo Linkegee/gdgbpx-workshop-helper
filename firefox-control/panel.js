@@ -16,7 +16,7 @@ async function readStudy(id){
  try{
   const value=await rpc('study',{id});
   if(value.status!=='already-logged-in'){
-   row.children[1].textContent='身份待确认';row.children[3].textContent=messages[value.status]||'请先检查登录状态';return;
+   row.children[1].textContent='未读取';row.children[3].textContent=messages[value.status]||'请先检查登录状态';return;
   }
   const account=accounts.get(id);row.children[0].textContent=(value.name||account.verifiedName||account.username)+' · '+account.cookieStoreId;
   row.children[1].textContent=Number.isFinite(value.creditedHours)?value.creditedHours+' / 50':'未读到首页学时';
@@ -52,6 +52,7 @@ const messages={
  'submission-pending':'登录请求已发出，请检查结果，不要重复提交', 'submitted':'登录请求已提交，等待检查结果',
  'missing-fields':'请填写密码及验证码','page-operation-failed':'页面操作未完成，请打开学院页查看'
 };
+Object.assign(messages,{'login-required':'此容器登录已失效，请重新登录','page-fetch-unavailable':'浏览器未提供页面会话请求接口，未新开页面','home-http-failed':'首页请求失败，未新开页面','home-fields-missing':'首页返回内容未包含可识别学时字段','home-request-failed':'首页数据请求超时或失败，未新开页面','home-too-large':'首页返回内容异常，已停止解析'});
 async function rpc(action,data={}){const r=await browser.runtime.sendMessage({action,...data});if(!r?.ok)throw Error(r?.error||'扩展连接失效');return r.value;}
 function notice(text){$('#notice').textContent=text;}
 function retainPassword(row){

@@ -112,15 +112,38 @@ class Controller {
   const observation={at:Date.now(),binding:result.binding,documentId:result.documentId||null,captchaFingerprint:result.captchaFingerprint||null,status:String(result.status||'unknown'),name:String(result.name||'').slice(0,80),creditedHours:typeof result.creditedHours==='number'?result.creditedHours:null,agreementAccepted:result.agreementAccepted===true,hintCode:['captcha','credentials','pending'].includes(result.hintCode)?result.hintCode:''};
   this.observations.set(id,observation);return this.classify(row,result);
  });}
+ async readAccountHome(row,trace){
+  const tabs=(await this.api.tabs.query({cookieStoreId:row.cookieStoreId})).filter(t=>t.cookieStoreId===row.cookieStoreId);
+  const tab=tabs.find(t=>isHome(t.url)&&!t.discarded)||tabs.find(t=>isWorkshop(t.url)&&!t.discarded);
+  if(!tab)throw Error('study-no-page');
+  const check=async()=>{const current=await this.api.tabs.get(tab.id);if(current.cookieStoreId!==row.cookieStoreId||current.url!==tab.url)throw Error('study-container-changed');};
+  await check();
+  if(isHome(tab.url)){
+   // A temporary row avoids changing the tab used by the login workflow.
+   const result=await this.inspectStudyHome({...row,tabId:tab.id},trace);
+   return {...result,homeTabId:tab.id,source:'existing-homepage-dom'};
+  }
+  const entry={at:Date.now(),tabId:tab.id,route:'workshop',source:'container-page-fetch'};trace.push(entry);
+  let timer;
+  try{
+   const read=async()=>{
+    await this.api.tabs.executeScript(tab.id,{file:'hours-content.js',frameId:0,runAt:'document_idle'});await check();
+    const result=await this.api.tabs.sendMessage(tab.id,{channel:'gdgbpx-hours-v1',action:'inspect'},{frameId:0});await check();return result;
+   };
+   const result=await Promise.race([read(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('study-home-timeout')),12000);})]);
+   const statuses=['logged-in-unverified','page-fetch-unavailable','home-http-failed','home-too-large','login-required','home-fields-missing','home-request-failed'];
+   entry.result=statuses.includes(result?.status)?result.status:'unexpected-response';
+   return {...result,source:'container-page-fetch',homeTabId:null};
+  }finally{clearTimeout(timer);}
+ }
  async study(id) {return this.locked(id,async row=>{
   this.studies.delete(id);
   let stage='locate-home';const homeTrace=[];
   try {
-  const homeTab=await this.ensureHome(row);
   stage='read-home';
-  const home=await this.classify(row,await this.inspectStudyHome(row,homeTrace));
+  const home=await this.classify(row,await this.readAccountHome(row,homeTrace));
   const snapshot={at:Date.now(),status:home.status,name:home.name||'',creditedHours:null,completedHours:null,
-   homeTabId:homeTab.id,homeTrace,source:'container-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
+   homeTabId:home.homeTabId,homeTrace,source:home.source,completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
   if(home.status!=='already-logged-in'){this.studies.set(id,snapshot);return snapshot;}
   snapshot.creditedHours=Number.isFinite(home.creditedHours)&&home.creditedHours>=0?home.creditedHours:null;
   stage='read-workshops';
@@ -138,12 +161,12 @@ class Controller {
   }
   // Recheck the homepage identity after collecting other tabs; fail closed on a session switch.
   stage='verify-identity';
-  const latest=await this.communicate(row,{action:'inspect'});
+  const latest=await this.readAccountHome(row,homeTrace);
   if(latest.status!=='logged-in-unverified'||latest.identityKey!==home.identityKey)throw Error('身份已变化，请重新检查');
   this.studies.set(id,snapshot);return snapshot;
   }catch(error){
    const reasons={'locate-home':'无法在对应容器打开或定位首页','read-home':'首页未就绪、已离开或连接失效','read-workshops':'无法读取对应容器的专题页','verify-identity':'读取后身份或首页状态发生变化'};
-   const detail={'study-home-timeout':'后台首页等待超时，请下载诊断查看加载状态','study-container-changed':'后台首页容器已改变，已停止读取','study-route-changed':'后台首页跳转到其他页面，已停止读取','study-discarded':'后台首页仍处于休眠状态'}[error.message]||reasons[stage];
+   const detail={'study-no-page':'此容器没有可读取的学院页面，请打开任一学院首页或专题页','study-home-timeout':'后台首页等待超时，请下载诊断查看加载状态','study-container-changed':'后台首页容器已改变，已停止读取','study-route-changed':'后台首页跳转到其他页面，已停止读取','study-discarded':'后台首页仍处于休眠状态'}[error.message]||reasons[stage];
    this.studies.set(id,{at:Date.now(),status:'read-failed',stage,error:detail,homeTrace,creditedHours:null,completedHours:null,tabs:[]});
    this.log(id,'study-failed-'+stage);throw Error(detail);
   }
@@ -179,7 +202,7 @@ class Controller {
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);this.studies.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.3.2',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.3.3',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome,isWorkshop};
