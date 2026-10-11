@@ -24,7 +24,7 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     Object.assign(context.document,documentOverrides);
     context.window=context;context.top=context;
     await vm.runInNewContext(source.replace('    installGlobalErrorLogging();',
-        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,recordExitMarker,recordPageHealth,detectInterruptedDocument,setHeartbeat(value){GM_setValue(PLAYER_HEARTBEAT_KEY,value);},startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
+        '    globalThis.testApi={getState,updateState,handlePanelAction,handleIdentityEntry,accountRuntime,diagnosticBundle,recordFlightSample,clearLogs,recordExitMarker,recordPageHealth,detectInterruptedDocument,setHeartbeat(value){GM_setValue(PLAYER_HEARTBEAT_KEY,value);},startForegroundHealthCheck,debugLog,sanitizeLogValue};return;\n    installGlobalErrorLogging();'),context);
     if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
@@ -62,7 +62,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.42/);
+    assert.match(source,/@version\s+1\.5\.43/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
@@ -302,4 +302,43 @@ test('normal pagehide and different tabs do not create an interruption marker',a
  assert.equal(second.testApi.diagnosticBundle().interruption,null);
  const other=await boot(values,tabState());other.testApi.detectInterruptedDocument();
  assert.equal(other.testApi.diagnosticBundle().interruption,null);
+});
+
+
+test('flight recorder retains before/after media evidence through reload without media credentials',async()=>{
+ const values=new Map(),tab=tabState();
+ const c=await boot(values,tab);let position=10;
+ c.document.querySelector=s=>s==='video'?{currentTime:position,duration:100,paused:true,readyState:2,networkState:2,
+   error:{code:3,message:'private-token'},currentSrc:'https://example.test/?token=secret',
+   buffered:{length:1,start:()=>0,end:()=>12}}:null;
+ c.testApi.recordFlightSample('sample');
+ c.testApi.debugLog('error','media-recovery-exhausted');
+ position=12;c.testApi.recordFlightSample('sample');
+ const reloaded=await boot(values,tab),flight=reloaded.testApi.diagnosticBundle().flightRecorder;
+ assert.equal(flight.main.incidents.length,1);
+ assert.equal(flight.main.incidents[0].before.at(-1).video.currentTime,10);
+ assert.equal(flight.main.incidents[0].after.at(-1).video.currentTime,12);
+ assert.equal(flight.main.samples.at(-1).video.errorCode,3);
+ assert.equal(flight.main.samples.at(-1).video.buffered[0][1],12);
+ assert.doesNotMatch(JSON.stringify(flight),/private-token|secret|example.test/);
+ const other=await boot(values,tabState());assert.equal(other.testApi.diagnosticBundle().flightRecorder.main,null);
+});
+test('flight recorder caps storage and clearing logs removes recorder history',async()=>{
+ const c=await boot(new Map(),tabState());
+ for(let i=0;i<100;i++)c.testApi.recordFlightSample('sample');
+ for(let i=0;i<7;i++)c.testApi.recordFlightSample('fault-'+i,true);
+ const data=c.testApi.diagnosticBundle().flightRecorder.main;
+ assert.equal(data.samples.length,80);assert.equal(data.incidents.length,4);
+ for(const incident of data.incidents){assert.ok(incident.before.length<=8);assert.ok(incident.after.length<=4);}
+ c.testApi.clearLogs();assert.equal(c.testApi.diagnosticBundle().flightRecorder.main,null);
+});
+
+test('main export includes matching player recorder and a broken buffer does not throw',async()=>{
+ const values=new Map(),main=await boot(values,tabState());
+ const player=await boot(values,tabState(),main.testApi.accountRuntime.playerUrl('https://cs1.gdgbpx.com/play'));
+ player.testApi.recordFlightSample('sample');
+ assert.equal(main.testApi.diagnosticBundle().flightRecorder.player.samples.length,1);
+ player.document.querySelector=()=>({buffered:{length:1,start(){throw Error('detached');}}});
+ assert.doesNotThrow(()=>player.testApi.recordFlightSample('sample'));
+ assert.equal(main.testApi.diagnosticBundle().flightRecorder.player.samples.length,1);
 });

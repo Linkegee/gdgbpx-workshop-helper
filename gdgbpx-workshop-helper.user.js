@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.42
+// @version      1.5.43
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = '1.5.42';
+    const VERSION = '1.5.43';
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -388,6 +388,9 @@ function createSessionRequest(native,page,runtime,location,timers) {
     const EVENT_KEY = 'gdgbpx_workshop_helper_event_v1';
     const PANEL_POSITION_KEY = 'gdgbpx_workshop_helper_panel_position_v1';
     const PANEL_COLLAPSED_KEY = 'gdgbpx_workshop_helper_panel_collapsed_v1';
+    const FLIGHT_KEY = 'gdgbpx_flight_v1_';
+    const FLIGHT_INTERVAL_MS = 15000;
+    let lastFlightSampleAt = 0;
     const FAILURE_KEY = 'gdgbpx_last_failure_v2';
     const diagnosticDocumentTag = typeof bootstrapDocumentTag === 'string' ? bootstrapDocumentTag : 'unavailable';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
@@ -823,6 +826,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
                 GM_setValue(FAILURE_KEY, {time:entry.time,event,documentTag:diagnosticDocumentTag,
                     snapshot:diagnosticSnapshot(),recentLogs:logs.slice(-30)});
             }
+            if (level === 'error' || ['player-stall-timeout','video-play-rejected','video-pause-recovery-rejected','possible-abrupt-exit'].includes(event)
+                || (event === 'state-change' && detail?.from?.phase !== detail?.to?.phase && /failed|stalled|mismatch/.test(detail?.to?.phase || ''))) {
+                recordFlightSample(event, true);
+            }
             const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
             console[method]('[GBP助手]', event, entry.detail);
             queueBridgeLog(entry);
@@ -978,6 +985,60 @@ function createSessionRequest(native,page,runtime,location,timers) {
         }
     }
 
+    function flightRole() {
+        if (location.hostname === MAIN_HOST) return window.top === window ? 'main' : '';
+        if (PLAYER_HOSTS.has(location.hostname)) return window.top === window ? 'player' : 'media';
+        return '';
+    }
+
+    // Small, credential-free samples; no DOM dumps, URLs, response bodies or media data.
+    function recordFlightSample(reason = 'interval', incident = false) {
+        const role = flightRole();
+        if (!role) return;
+        try {
+            const now = Date.now(), state = getState(), heartbeat = getPlayerHeartbeat();
+            const video = playerVideo || document.querySelector('video');
+            const buffered = [];
+            if (video?.buffered) {
+                for (let i = Math.max(0, video.buffered.length - 5); i < video.buffered.length; i++) {
+                    buffered.push([video.buffered.start(i), video.buffered.end(i)]);
+                }
+            }
+            const finite = value => Number.isFinite(value) ? value : null;
+            const sample = {at:now,documentTag:diagnosticDocumentTag,version:VERSION,reason,
+                status:state.status,phase:state.phase,lessonKey:state.currentLessonKey,
+                visibility:document.visibilityState || 'unknown',readyState:document.readyState,
+                online:typeof navigator === 'undefined' ? null : navigator.onLine,
+                intervalDelayMs:reason === 'interval' && lastFlightSampleAt ? Math.max(0,now-lastFlightSampleAt-FLIGHT_INTERVAL_MS) : null,
+                heartbeatAgeMs:heartbeat ? Math.max(0,now-Number(heartbeat.at || 0)) : null,
+                heartbeatMatches:heartbeat ? heartbeat.lessonKey === state.currentLessonKey : null,
+                closePending:playerClosePending,managedTabClosed:fallbackPlayerTab ? fallbackPlayerTab.closed === true : null,
+                video:video ? {currentTime:finite(video.currentTime),duration:finite(video.duration),
+                    paused:Boolean(video.paused),ended:Boolean(video.ended),seeking:Boolean(video.seeking),
+                    readyState:video.readyState,networkState:video.networkState,errorCode:video.error?.code || null,buffered} : null};
+            if (reason === 'interval') lastFlightSampleAt = now;
+            const saved = GM_getValue(FLIGHT_KEY + role,{samples:[],incidents:[]});
+            const samples = (Array.isArray(saved.samples) ? saved.samples : []).filter(x=>now-x.at<86400000).slice(-79);
+            const incidents = (Array.isArray(saved.incidents) ? saved.incidents : []).filter(x=>now-x.at<86400000).slice(-4);
+            for (const entry of incidents) {
+                if (entry.after.length < 4 && now-entry.at <= 120000) entry.after.push(sample);
+            }
+            samples.push(sample);
+            if (incident) {
+                const previous = incidents.at(-1);
+                if (previous && previous.reason === reason && previous.documentTag === diagnosticDocumentTag && now-previous.at < 60000) {
+                    previous.repeats = (previous.repeats || 1) + 1;
+                } else incidents.push({at:now,reason,documentTag:diagnosticDocumentTag,before:samples.slice(-8),after:[]});
+            }
+            GM_setValue(FLIGHT_KEY + role,{samples,incidents:incidents.slice(-4)});
+        } catch (_) { /* Diagnostic failure must never interrupt playback or recursively log. */ }
+    }
+
+    function readFlightRecorder() {
+        return {sampleIntervalMs:FLIGHT_INTERVAL_MS,maxSamplesPerRole:80,
+            main:GM_getValue(FLIGHT_KEY+'main',null),player:GM_getValue(FLIGHT_KEY+'player',null),media:GM_getValue(FLIGHT_KEY+'media',null)};
+    }
+
     function diagnosticSnapshot() {
         const state = getState(), heartbeat = getPlayerHeartbeat();
         let video = null;
@@ -1017,6 +1078,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
             pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
             interruption: readExitMarker()?.interruption || null,
             lastFailure: GM_getValue(FAILURE_KEY,null),
+            flightRecorder: readFlightRecorder(),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
     }
@@ -1047,6 +1109,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
+        for (const role of ['main','player','media']) GM_deleteValue(FLIGHT_KEY + role);
         GM_deleteValue(PAGE_HEALTH_KEY);
         try { window.sessionStorage.removeItem(TAB_EXIT_MARKER_KEY); } catch (_) {}
         debugLog('info', 'logs-cleared');
@@ -1071,6 +1134,8 @@ function createSessionRequest(native,page,runtime,location,timers) {
     }
 
     function installGlobalErrorLogging() {
+        recordFlightSample('boot');
+        if (flightRole()) setInterval(()=>recordFlightSample(),FLIGHT_INTERVAL_MS);
         detectInterruptedDocument();
         recordExitMarker('alive');
         setInterval(()=>recordExitMarker('alive'),10000);
@@ -1082,6 +1147,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         setInterval(()=>recordPageHealth(),30000);
         for (const name of ['pageshow','pagehide','online','offline']) {
             window.addEventListener(name,event=>{
+                recordFlightSample(name);
                 recordPageHealth(name);
                 debugLog('info','page-lifecycle',{type:name,persisted:Boolean(event.persisted),structure:pageStructureSummary()});
             });
@@ -3873,7 +3939,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.42",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.43",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
