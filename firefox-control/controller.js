@@ -40,19 +40,34 @@ class Controller {
   if(tab.cookieStoreId!==row.cookieStoreId || !isHome(tab.url))throw Error('登录页或容器已改变，请重新准备');
   return tab;
  }
- async prepare(id) {return this.locked(id,async row=>{
+ async ensureHome(row) {
   await this.api.contextualIdentities.get(row.cookieStoreId);
   let tab=null;try{tab=await this.checkedTab(row);}catch{}
   if(!tab) {
    // Reuse only an exact homepage in the bound container; never navigate a course/player tab.
    const tabs=await this.api.tabs.query({cookieStoreId:row.cookieStoreId});
-   tab=tabs.find(t=>isHome(t.url));
+   tab=tabs.find(t=>t.cookieStoreId===row.cookieStoreId&&isHome(t.url));
    if(!tab)tab=await this.api.tabs.create({url:HOME,cookieStoreId:row.cookieStoreId,active:false});
    if(tab.cookieStoreId!==row.cookieStoreId)throw Error('浏览器未在指定容器打开页面');
    row.tabId=tab.id;await this.persist();
   }
+  return tab;
+ }
+ async prepare(id) {return this.locked(id,async row=>{
+  const tab=await this.ensureHome(row);
   this.observations.delete(id);this.log(id,'prepared');return {tabId:tab.id};
  });}
+ async inspectStudyHome(row) {
+  // A newly created inactive tab can still be loading. Bound retries also cover delayed adapter injection.
+  for(let attempt=0;attempt<4;attempt++){
+   await this.checkedTab(row); // Never retry a container or navigation mismatch.
+   let result;
+   try{result=await this.communicate(row,{action:'inspect'});}catch(error){if(attempt===3)throw error;}
+   if(result && !['unsupported-page','captcha-loading'].includes(result.status))return result;
+   if(attempt===3)throw Error('study-home-not-ready');
+   await new Promise(resolve=>setTimeout(resolve,600));
+  }
+ }
  async communicate(row,payload) {
   const tab=await this.checkedTab(row);let timer;
   const operation=async()=>{
@@ -77,11 +92,16 @@ class Controller {
  });}
  async study(id) {return this.locked(id,async row=>{
   this.studies.delete(id);
-  const home=await this.classify(row,await this.communicate(row,{action:'inspect'}));
+  let stage='locate-home';
+  try {
+  const homeTab=await this.ensureHome(row);
+  stage='read-home';
+  const home=await this.classify(row,await this.inspectStudyHome(row));
   const snapshot={at:Date.now(),status:home.status,name:home.name||'',creditedHours:null,completedHours:null,
-   source:'existing-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
+   homeTabId:homeTab.id,source:'container-homepage-dom',completedReason:'尚缺完整专题学时和入账明细，不能可靠汇总',tabs:[]};
   if(home.status!=='already-logged-in'){this.studies.set(id,snapshot);return snapshot;}
   snapshot.creditedHours=Number.isFinite(home.creditedHours)&&home.creditedHours>=0?home.creditedHours:null;
+  stage='read-workshops';
   const tabs=(await this.api.tabs.query({cookieStoreId:row.cookieStoreId})).filter(t=>t.cookieStoreId===row.cookieStoreId&&isWorkshop(t.url));
   snapshot.truncated=tabs.length>10;
   for(const tab of tabs.slice(0,10)){
@@ -95,9 +115,15 @@ class Controller {
    }catch{snapshot.tabs.push({tabId:tab.id,error:'页面未就绪或容器/地址已改变'});}finally{clearTimeout(timer);}
   }
   // Recheck the homepage identity after collecting other tabs; fail closed on a session switch.
+  stage='verify-identity';
   const latest=await this.communicate(row,{action:'inspect'});
   if(latest.status!=='logged-in-unverified'||latest.identityKey!==home.identityKey)throw Error('身份已变化，请重新检查');
   this.studies.set(id,snapshot);return snapshot;
+  }catch(error){
+   const reasons={'locate-home':'无法在对应容器打开或定位首页','read-home':'首页未就绪、已离开或连接失效','read-workshops':'无法读取对应容器的专题页','verify-identity':'读取后身份或首页状态发生变化'};
+   this.studies.set(id,{at:Date.now(),status:'read-failed',stage,error:reasons[stage],creditedHours:null,completedHours:null,tabs:[]});
+   this.log(id,'study-failed-'+stage);throw Error(reasons[stage]);
+  }
  });}
  async classify(row,result) {
   if(result.status!=='logged-in-unverified')return result;
@@ -130,7 +156,7 @@ class Controller {
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);this.studies.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.3.0',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.3.1',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null,study:this.studies.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome,isWorkshop};

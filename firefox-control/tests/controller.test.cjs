@@ -1,6 +1,16 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {Controller,isHome}=require('../controller.js');
+test('hours read recovers after login tab navigates into workshop without disturbing that tab',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);
+ const formerHome=f.tabs.get(f.c.row(a.id).tabId);
+ formerHome.url='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/mergeClass?classId=test';
+ f.api.tabs.sendMessage=async(id,msg)=>msg.channel==='gdgbpx-study-v1'?{rows:[]}:{status:'logged-in-unverified',identityKey:'a',name:'测试姓名',creditedHours:18.6};
+ const result=await f.c.study(a.id);
+ assert.equal(result.creditedHours,18.6);assert.match(formerHome.url,/mergeClass/);
+ const home=f.tabs.get(f.c.row(a.id).tabId);assert.notEqual(home.id,formerHome.id);assert.equal(home.active,false);assert.equal(home.cookieStoreId,a.cookieStoreId);
+ const count=f.tabs.size;await f.c.study(a.id);assert.equal(f.tabs.size,count);
+});
 function fixture(){
  const saved={},tabs=new Map(),containers=new Map(),messages=[];let serial=0;
  const api={storage:{local:{get:async()=>structuredClone(saved),set:async value=>Object.assign(saved,structuredClone(value))}},
@@ -113,5 +123,25 @@ test('study discards tab data if container changes during read and rejects ident
  };
  const result=await f.c.study(a.id);assert.ok(result.tabs[0].error);assert.doesNotMatch(JSON.stringify(result),/DO_NOT_ACCEPT/);
  homeReads=0;f.api.tabs.sendMessage=async()=>({status:'logged-in-unverified',identityKey:++homeReads===1?'a':'b',name:'测试姓名',creditedHours:2});
- await assert.rejects(f.c.study(a.id),/身份已变化/);assert.equal(f.c.studies.has(a.id),false);
+ await assert.rejects(f.c.study(a.id),/身份或首页状态发生变化/);assert.equal(f.c.studies.get(a.id).status,'read-failed');assert.equal(f.c.studies.get(a.id).creditedHours,null);
+});
+
+test('hours read reuses another homepage after bound tab closes and never uses another container',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});await f.c.prepare(a.id);f.tabs.delete(f.c.row(a.id).tabId);
+ await f.api.tabs.create({url:'https://gbpx.gd.gov.cn/gdceportal/index.aspx',cookieStoreId:'other'});
+ const home=await f.api.tabs.create({url:'https://gbpx.gd.gov.cn/gdceportal/index.aspx',cookieStoreId:a.cookieStoreId});
+ f.api.tabs.sendMessage=async(id)=>{assert.equal(id,home.id);return {status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3};};
+ const result=await f.c.study(a.id);assert.equal(result.creditedHours,3);assert.equal(f.tabs.size,2);
+});
+
+test('hours read waits for a newly created homepage adapter without opening duplicate tabs',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});let reads=0;
+ f.api.tabs.sendMessage=async()=>{if(++reads===1)throw Error('no receiver');return {status:'logged-in-unverified',name:'测试姓名',identityKey:'a',creditedHours:3};};
+ assert.equal((await f.c.study(a.id)).creditedHours,3);assert.equal(f.tabs.size,1);
+});
+
+test('study failures retain redacted stage diagnostics without raw browser errors',async()=>{
+ const f=fixture(),a=await f.c.add({username:'测试姓名'});f.api.contextualIdentities.get=async()=>{throw Error('SECRET');};
+ await assert.rejects(f.c.study(a.id),/对应容器/);
+ const data=f.c.diagnostics();assert.equal(data.accounts[0].study.stage,'locate-home');assert.doesNotMatch(JSON.stringify(data),/SECRET/);
 });
