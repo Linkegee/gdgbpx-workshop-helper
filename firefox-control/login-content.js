@@ -3,6 +3,7 @@
 if(globalThis.__ganbuLoginAdapterV1)return;
 globalThis.__ganbuLoginAdapterV1=true;
 const $=s=>document.querySelector(s);
+const documentId=crypto.randomUUID();
 let challenge=null, submittedAt=0;
 function loggedIn() {return Boolean($('#ctl00_thetheUser')?.textContent.trim());}
 function fill(element,value) {
@@ -28,12 +29,15 @@ async function inspect() {
   const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;
   canvas.getContext('2d').drawImage(image,0,0);bitmap=canvas.toDataURL('image/png');
  }catch{return {status:'captcha-unavailable'};}
- if(!challenge||challenge.source!==image.currentSrc||challenge.bitmap!==bitmap)challenge={source:image.currentSrc,bitmap,token:crypto.randomUUID()};
+ if(!challenge||challenge.source!==image.currentSrc||challenge.bitmap!==bitmap){
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(bitmap));
+  challenge={source:image.currentSrc,bitmap,token:crypto.randomUUID(),fingerprint:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')};
+ }
  // Only classify hints. Never echo arbitrary page messages which may contain credentials.
  const hint=$('#hintMsg')?.innerText||'';
  let hintCode='';
  if(/验证码/.test(hint))hintCode='captcha';else if(/密码|用户名|账号/.test(hint))hintCode='credentials';else if(/正在登录/.test(hint))hintCode='pending';
- return {status:'awaiting-captcha',captchaImage:bitmap,challenge:challenge.token,agreementAccepted:Boolean($('#cbAgree')?.checked),hintCode};
+ return {status:'awaiting-captcha',documentId,captchaFingerprint:challenge.fingerprint,captchaImage:bitmap,challenge:challenge.token,agreementAccepted:Boolean($('#cbAgree')?.checked),hintCode};
 }
 browser.runtime.onMessage.addListener((message,sender)=>{
  if(sender.id!==browser.runtime.id || message?.channel!=='gdgbpx-login-v1')return undefined;

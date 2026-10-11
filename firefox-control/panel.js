@@ -16,7 +16,16 @@ const messages={
 };
 async function rpc(action,data={}){const r=await browser.runtime.sendMessage({action,...data});if(!r?.ok)throw Error(r?.error||'扩展连接失效');return r.value;}
 function notice(text){$('#notice').textContent=text;}
+function markSameImages(){
+ const counts=new Map();for(const row of views.values()){const key=row.dataset.captchaFingerprint;if(key)counts.set(key,(counts.get(key)||0)+1);}
+ let duplicate=false;
+ for(const row of views.values()){const same=Boolean(row.dataset.captchaFingerprint&&counts.get(row.dataset.captchaFingerprint)>1);row.querySelector('.same-image').hidden=!same;duplicate ||= same;}
+ $('#captcha-warning').textContent=duplicate?'检测到多账号验证码图片完全相同。图片相同不等于容器相同；请查看每行实际容器，必要时只换其中一行验证码。':'';
+}
 function show(row,result){
+ row.dataset.captchaFingerprint=result.captchaFingerprint||'';
+ const b=result.binding;
+ row.querySelector('.binding-check').textContent=b?('已核验：'+b.actualContainerId+' · 标签 '+b.tabId+' · '+new Date(b.checkedAt).toLocaleTimeString()):'实际容器尚未核验';
  row.dataset.status=result.status;
  row.dataset.identityKey=result.identityKey||'';
  const needsChoice=['identity-confirmation','identity-mismatch'].includes(result.status);
@@ -34,6 +43,7 @@ function show(row,result){
  if(result.status==='awaiting-captcha'&&!result.agreementAccepted&&!row.querySelector('.agree').checked)row.querySelector('.status').textContent+='；需要同意使用协议';
  if(result.hintCode==='credentials')row.querySelector('.status').textContent+='；网站提示账号或密码问题';
  if(result.hintCode==='captcha')row.querySelector('.status').textContent+='；网站提示验证码问题';
+ markSameImages();
 }
 async function poll(row,id,waitingLogout=false){
  const deadline=Date.now()+30000;let lastError;
@@ -42,7 +52,7 @@ async function poll(row,id,waitingLogout=false){
   catch(error){lastError=error;}
   if(Date.now()>deadline)break;await new Promise(r=>setTimeout(r,900));
  }
- if(lastError)row.querySelector('.status').textContent=lastError.message;
+ if(lastError)throw lastError;
 }
 async function pool(ids,action){let next=0;await Promise.all(Array.from({length:Math.min(3,ids.length)},async()=>{while(next<ids.length){const id=ids[next++];await act(id,action);}}));}
 async function act(id,action){
@@ -64,17 +74,17 @@ async function act(id,action){
    show(row,result);
   }else if(action==='prepare'||action==='refresh'){
    await rpc(action,{id});row.querySelector('.status').textContent='已准备，等待页面加载';delete row.dataset.challenge;
-   row.querySelector('.code').value='';row.querySelector('.captcha').hidden=true;await poll(row,id);
+   row.querySelector('.code').value='';row.querySelector('.captcha').hidden=true;row.dataset.captchaFingerprint='';markSameImages();await poll(row,id);
   }else if(action==='inspect')await poll(row,id);
-  else if(action==='remove'){await rpc(action,{id});row.remove();views.delete(id);accounts.delete(id);$('#empty').hidden=views.size>0;}
+  else if(action==='remove'){await rpc(action,{id});row.remove();views.delete(id);accounts.delete(id);markSameImages();$('#empty').hidden=views.size>0;}
   else await rpc(action,{id});
- }catch(error){row.querySelector('.status').textContent=error.message;row.querySelector('.status').classList.add('error');}
+ }catch(error){row.querySelector('.status').textContent=error.message;row.querySelector('.status').classList.add('error');row.querySelector('.binding-check').textContent='本次核验失败，实际容器未确认';delete row.dataset.challenge;row.dataset.captchaFingerprint='';row.querySelector('.code').value='';row.querySelector('.captcha').hidden=true;markSameImages();}
  finally{delete row.dataset.busy;row.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
 function addView(account){
  accounts.set(account.id,account);
  const row=$('#row-template').content.firstElementChild.cloneNode(true);
- row.querySelector('.title').textContent=(account.label?account.label+' · ':'')+account.username;
+ row.querySelector('.title').textContent=(account.label&&account.label!==account.username?account.label+' · ':'')+account.username;
  row.querySelector('.container-name').textContent=account.cookieStoreId;
  row.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>act(account.id,button.dataset.action)));
  row.querySelector('.code').addEventListener('keydown',async event=>{if(event.key==='Enter'){event.preventDefault();await act(account.id,'submit');const list=[...views.values()];list[list.indexOf(row)+1]?.querySelector('.code').focus();}});
@@ -82,10 +92,11 @@ function addView(account){
  if(account.observation){row.querySelector('.status').textContent='上次状态已保存；请检查当前状态';}
 }
 async function batch(action){
- const buttons=document.querySelectorAll('.toolbar button');buttons.forEach(b=>b.disabled=true);
+ const buttons=document.querySelectorAll('.toolbar button,.workbench-actions button');buttons.forEach(b=>b.disabled=true);
  try{const ids=[...views].filter(([id,row])=>action!=='submit'||(row.querySelector('.password').value&&row.querySelector('.code').value)).map(([id])=>id);await pool(ids,action);notice('本轮操作完成；每个账号的结果显示在对应卡片中。');}
  finally{buttons.forEach(b=>b.disabled=false);}
 }
+$('#submit-codes').onclick=()=>batch('submit');
 $('#prepare-all').onclick=()=>batch('prepare');$('#submit-all').onclick=()=>batch('submit');$('#inspect-all').onclick=()=>batch('inspect');
 $('#add-form').onsubmit=async event=>{
  event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;

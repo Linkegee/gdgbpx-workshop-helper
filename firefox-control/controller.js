@@ -59,7 +59,10 @@ class Controller {
     await this.api.tabs.executeScript(tab.id,{file:'login-content.js',frameId:0,runAt:'document_idle'});
     await this.checkedTab(row);
    }
-   return this.api.tabs.sendMessage(tab.id,{channel:'gdgbpx-login-v1',...payload},{frameId:0});
+   const result=await this.api.tabs.sendMessage(tab.id,{channel:'gdgbpx-login-v1',...payload},{frameId:0});
+   const actual=await this.checkedTab(row);
+   if(actual.id!==tab.id)throw Error('登录页或容器已改变，请重新准备');
+   return {...result,binding:{tabId:actual.id,expectedContainerId:row.cookieStoreId,actualContainerId:actual.cookieStoreId,checkedAt:Date.now()}};
   };
   try{return await Promise.race([operation(),
    new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('page-timeout')),12000);})]);}
@@ -68,7 +71,7 @@ class Controller {
  async inspect(id) {return this.locked(id,async row=>{
   const result=await this.communicate(row,{action:'inspect'});
   // Do not retain the CAPTCHA bitmap or any credentials in the background.
-  const observation={at:Date.now(),status:String(result.status||'unknown'),name:String(result.name||'').slice(0,80),creditedHours:typeof result.creditedHours==='number'?result.creditedHours:null,agreementAccepted:result.agreementAccepted===true,hintCode:['captcha','credentials','pending'].includes(result.hintCode)?result.hintCode:''};
+  const observation={at:Date.now(),binding:result.binding,documentId:result.documentId||null,captchaFingerprint:result.captchaFingerprint||null,status:String(result.status||'unknown'),name:String(result.name||'').slice(0,80),creditedHours:typeof result.creditedHours==='number'?result.creditedHours:null,agreementAccepted:result.agreementAccepted===true,hintCode:['captcha','credentials','pending'].includes(result.hintCode)?result.hintCode:''};
   this.observations.set(id,observation);return this.classify(row,result);
  });}
  async classify(row,result) {
@@ -102,7 +105,7 @@ class Controller {
  async refresh(id) {return this.locked(id,row=>this.communicate(row,{action:'refresh'}));}
  async focus(id) {return this.locked(id,async row=>{const tab=await this.checkedTab(row);await this.api.tabs.update(tab.id,{active:true});await this.api.windows.update(tab.windowId,{focused:true});return {};});}
  async remove(id) {return this.locked(id,async()=>{this.rows=this.rows.filter(r=>r.id!==id);this.observations.delete(id);await this.persist();return {};});}
- diagnostics() {return {version:'0.2.1',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
+ diagnostics() {return {version:'0.2.2',generatedAt:new Date().toISOString(),events:this.events,accounts:this.rows.map(r=>({id:r.id,container:r.cookieStoreId,observation:this.observations.get(r.id)||null}))};}
 }
 root.GanbuController=Controller;
 if(typeof module!=='undefined')module.exports={Controller,isHome};

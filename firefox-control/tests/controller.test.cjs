@@ -74,3 +74,13 @@ test('switch account requires explicit confirmation and forwards fingerprint wit
  await assert.rejects(f.c.switchLogin(a.id,'key',false),/确认/);assert.equal(f.messages.length,0);
  await f.c.switchLogin(a.id,'key',true);assert.equal(f.messages[0].msg.action,'logout');assert.equal(f.messages[0].msg.identityKey,'key');
 });
+
+test('captcha inspection returns actual tab/container evidence and rejects a change during response',async()=>{
+ const f=fixture(),a=await f.c.add({username:'alice'});await f.c.prepare(a.id);
+ f.api.tabs.sendMessage=async()=>({status:'awaiting-captcha',documentId:'doc-a',captchaFingerprint:'image-fingerprint',captchaImage:'private-image',challenge:'private-challenge'});
+ const result=await f.c.inspect(a.id);
+ assert.equal(result.binding.actualContainerId,a.cookieStoreId);assert.equal(result.binding.tabId,f.c.row(a.id).tabId);
+ const diag=JSON.stringify(f.c.diagnostics());assert.match(diag,/image-fingerprint/);assert.doesNotMatch(diag,/private-image|private-challenge/);
+ f.api.tabs.sendMessage=async()=>{f.tabs.get(f.c.row(a.id).tabId).cookieStoreId='firefox-default';return {status:'awaiting-captcha'};};
+ await assert.rejects(f.c.inspect(a.id),/容器/);
+});

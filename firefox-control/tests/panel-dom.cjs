@@ -3,14 +3,15 @@ const {JSDOM}=require('../../.panel-test-runtime/node_modules/jsdom');
 const flush=()=>new Promise(r=>setImmediate(r));
 test('real panel DOM adds accounts, escapes labels, batches distinct challenges and clears passwords',async()=>{
  const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../panel.html'),'utf8'),{runScripts:'outside-only',url:'https://extension-test.invalid/'});
- const w=dom.window,doc=w.document,requests=[],rows=[];let id=0;
+ const w=dom.window,doc=w.document,requests=[],rows=[],revisions={};let id=0;
  w.setTimeout=()=>1;
  w.browser={runtime:{sendMessage:async msg=>{
   requests.push(msg);let value;
   if(msg.action==='containers'||msg.action==='list')value=[];
   if(msg.action==='add'){value={id:String(++id),username:msg.username,label:msg.label,cookieStoreId:'container-'+id};rows.push(value);}
   if(msg.action==='prepare')value={tabId:Number(msg.id)};
-  if(msg.action==='inspect')value={status:'awaiting-captcha',captchaImage:'data:image/png;base64,AAAA',challenge:'challenge-'+msg.id,agreementAccepted:false};
+  if(msg.action==='refresh')revisions[msg.id]=1;
+  if(msg.action==='inspect')value={status:'awaiting-captcha',captchaImage:'data:image/png;base64,AAAA',captchaFingerprint:revisions[msg.id]?'changed':'common-image',challenge:'challenge-'+msg.id+(revisions[msg.id]?'-new':''),binding:{actualContainerId:'actual-'+msg.id,tabId:Number(msg.id),checkedAt:Date.now()},agreementAccepted:false};
   if(msg.action==='submit')value={status:'submitted'};
   return {ok:true,value};
  }}};
@@ -22,9 +23,16 @@ test('real panel DOM adds accounts, escapes labels, batches distinct challenges 
  doc.querySelector('#inspect-all').click();await flush();
  const cards=[...doc.querySelectorAll('.account')];
  cards.forEach((c,i)=>{assert.equal(c.querySelector('.agree').checked,true);assert.equal(c.dataset.challenge,'challenge-'+(i+1));c.querySelector('.password').value='SECRET-'+i;c.querySelector('.code').value='CODE-'+i;});
- doc.querySelector('#submit-all').click();await flush();
+ assert.equal(doc.querySelectorAll('#captcha-workbench .code').length,2);
+ assert.match(doc.querySelector('#captcha-warning').textContent,/完全相同/);
+ assert.match(cards[0].querySelector('.binding-check').textContent,/actual-1/);
+ assert.match(cards[1].querySelector('.binding-check').textContent,/actual-2/);
+ cards[0].querySelector('[data-action=refresh]').click();await flush();
+ assert.equal(cards[0].querySelector('.code').value,'');assert.equal(cards[1].querySelector('.code').value,'CODE-1');
+ assert.equal(doc.querySelector('#captcha-warning').textContent,'');cards[0].querySelector('.code').value='CODE-0';
+ doc.querySelector('#submit-codes').click();await flush();
  const submits=requests.filter(x=>x.action==='submit');assert.equal(submits.length,2);
- submits.forEach((m,i)=>{assert.equal(m.id,String(i+1));assert.equal(m.password,'SECRET-'+i);assert.equal(m.challenge,'challenge-'+(i+1));assert.equal(m.agree,true);});
+ submits.forEach((m,i)=>{assert.equal(m.id,String(i+1));assert.equal(m.password,'SECRET-'+i);assert.equal(m.challenge,'challenge-'+(i+1)+(i===0?'-new':''));assert.equal(m.agree,true);});
  cards.forEach(c=>{assert.equal(c.querySelector('.password').value,'');assert.equal(c.querySelector('.code').value,'');});
  dom.window.close();
 });
