@@ -6,7 +6,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 function boot(metadataResponse) {
     let now=1800000000000,nextId=0;
     const tasks=new Map(),values=new Map(),requests=[],metadataRequests=[];
-    const context={accountRuntime:runtimeStub,URL,URLSearchParams,
+    const context={accountRuntime:runtimeStub,progressNotifier:{tick(){},configure(){}},URL,URLSearchParams,
         Date:class extends Date {static now(){return now;}},
         setTimeout(fn,delay){const id=++nextId;tasks.set(id,{fn,at:now+delay});return id;},
         clearTimeout:id=>tasks.delete(id),

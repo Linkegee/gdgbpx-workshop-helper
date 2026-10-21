@@ -957,6 +957,14 @@
         GM_registerMenuCommand('下载诊断日志', downloadLogs);
         GM_registerMenuCommand('清空诊断日志', clearLogs);
         GM_registerMenuCommand('检查脚本更新', () => checkForScriptUpdate(true));
+        GM_registerMenuCommand('设置 Bark 进度提醒', () => {
+            const key = prompt('输入 Bark device key（留空关闭提醒，取消保持不变）');
+            if (key === null) return;
+            const minutes = key ? prompt('服务器进度无增长多少分钟后提醒？（3–120，默认10）','10') : '10';
+            if (minutes === null) return;
+            progressNotifier.configure(key.trim(),Number(minutes));
+        });
+        setInterval(() => progressNotifier.tick(getState()),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
             handlePlayerEvent(value);
@@ -1309,6 +1317,7 @@
             updateState({
                 status: 'running',
                 maintenance: freshRun ? null : state.maintenance,
+                userPaused: false,
                 phase: isDetailRoute() ? 'detail-ready' : 'list-ready',
                 message: '已启动，正在读取当前页面',
                 lastActionAt: 0,
@@ -1346,7 +1355,7 @@
         }
 
         if (action === 'pause') {
-            updateState({ status: 'paused', message: state.maintenance
+            updateState({ status: 'paused', userPaused: true, message: state.maintenance
                 ? '已暂停维护检查及自动恢复，点击“继续”恢复'
                 : '已暂停；播放器会暂停，点击“继续”恢复' });
             return;
@@ -1377,7 +1386,8 @@
                 closingPlayerSessionId: '',
                 closingPlayerLastSeenAt: 0,
                 closingPlayerUnloadAt: 0,
-                message: '继续运行'
+                message: '继续运行',
+                userPaused: false
             });
             // Retry reuses the scoped managed tab rather than opening a second native popup.
             if (recheckUnverifiedCompletion) {

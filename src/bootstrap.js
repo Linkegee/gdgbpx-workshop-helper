@@ -63,6 +63,9 @@
             onBlocked:()=>window.dispatchEvent(new Event('gbpx-account-ready'))
         });
         const storage = createAccountStorage(native,accountRuntime.id);
+        const progressNotifier = createProgressNotifier(native,accountRuntime.id);
+        const localBarkSeed = ''; // LOCAL_BARK_SEED
+        if (localBarkSeed && !native.GM_getValue('gdgbpx_bark_config_v1',null)) progressNotifier.configure(localBarkSeed);
         if(isMain && window.top===window) migratePreferences(native,storage);
         const {GM_getValue,GM_setValue,GM_deleteValue,GM_addValueChangeListener,GM_removeValueChangeListener}=storage;
         const GM_xmlhttpRequest = createSessionRequest(native,page,accountRuntime,location,{setTimeout,clearTimeout});
