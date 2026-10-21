@@ -60,6 +60,7 @@
     ]);
 
     let mainTickTimer = null;
+    let pendingStartTimer = null;
     let detailRefreshTimer = null;
     let panel = null;
     let playerVideo = null;
@@ -1223,7 +1224,11 @@
             renderPanel(getState());
             return;
         }
-        const state = getState();
+        if (['start','stop','pause','continue','skip','recheck'].includes(action)) {
+            clearTimeout(pendingStartTimer);
+            pendingStartTimer = null;
+        }
+        let state = getState();
         debugLog('info', 'panel-action', { action, status: state.status, phase: state.phase });
         if (action === 'copylog') {
             copyLogs();
@@ -1256,6 +1261,11 @@
             return;
         }
         if (action === 'start') {
+            // The extension's closed flag can arrive before its onclose callback.
+            if (fallbackPlayerTab?.closed === true && typeof fallbackPlayerTab.onclose === 'function') {
+                fallbackPlayerTab.onclose();
+                state = getState();
+            }
             // Start must not retire a player that is still alive or still processing Stop.
             const priorHeartbeat = getPlayerHeartbeat();
             const retryAbandonedCheck = ['refresh-delay','checking-progress'].includes(state.phase)
@@ -1270,9 +1280,28 @@
             const managedAlive = fallbackPlayerTab && fallbackPlayerTab.closed !== true;
             const stopPending = state.currentLessonKey && state.stopRequestAt && Date.now()-state.stopRequestAt < 30000;
             if (heartbeatAlive || managedAlive || stopPending) {
-                updateState({message:managedAlive ? '播放器标签页尚未确认关闭，请检查对应视频页' : heartbeatAlive ? '仍收到播放器心跳；暂停后恢复请点继续' : `正在等待停止指令处理，还需约 ${Math.max(1,Math.ceil((30000-(Date.now()-state.stopRequestAt))/1000))} 秒，再点开始`});
+                const waitMs = Math.max(heartbeatAlive ? 30000-(Date.now()-Number(heartbeat.at)) : 0,
+                    stopPending ? 30000-(Date.now()-state.stopRequestAt) : 0) + 250;
+                updateState({message:managedAlive ? '播放器标签页尚未确认关闭，请检查对应视频页' :
+                    `已收到开始请求，等待旧播放器心跳或停止指令失效（约 ${Math.ceil(waitMs/1000)} 秒），随后自动重试；暂停或停止可取消`});
                 debugLog('warn','start-blocked-existing-player',{heartbeatAlive:Boolean(heartbeatAlive),
                     managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
+                if (!managedAlive) {
+                    const expected = JSON.stringify([state.status,state.phase,state.currentLessonKey,state.stopRequestAt]);
+                    pendingStartTimer = setTimeout(() => {
+                        pendingStartTimer = null;
+                        const latest = getState();
+                        if (!accountRuntime.guard() || JSON.stringify([latest.status,latest.phase,latest.currentLessonKey,latest.stopRequestAt]) !== expected) return;
+                        const current = getPlayerHeartbeat();
+                        if (current && Date.now()-Number(current.at || 0) < 30000) {
+                            updateState({message:'播放器仍在发送新心跳，未新开视频；请检查对应视频页，暂停恢复请点继续'});
+                            debugLog('warn','start-retry-player-still-alive',{heartbeatAgeMs:Date.now()-Number(current.at || 0)});
+                            return;
+                        }
+                        debugLog('info','start-retry-after-player-silence',{});
+                        handlePanelAction('start');
+                    },waitMs);
+                }
                 return;
             }
             const freshRun = ['idle', 'stopped', 'complete'].includes(state.status);

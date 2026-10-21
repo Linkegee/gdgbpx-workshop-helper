@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.46
+// @version      1.5.47
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.46";
+    const VERSION = "1.5.47";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -438,6 +438,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
     ]);
 
     let mainTickTimer = null;
+    let pendingStartTimer = null;
     let detailRefreshTimer = null;
     let panel = null;
     let playerVideo = null;
@@ -1601,7 +1602,11 @@ function createSessionRequest(native,page,runtime,location,timers) {
             renderPanel(getState());
             return;
         }
-        const state = getState();
+        if (['start','stop','pause','continue','skip','recheck'].includes(action)) {
+            clearTimeout(pendingStartTimer);
+            pendingStartTimer = null;
+        }
+        let state = getState();
         debugLog('info', 'panel-action', { action, status: state.status, phase: state.phase });
         if (action === 'copylog') {
             copyLogs();
@@ -1634,6 +1639,11 @@ function createSessionRequest(native,page,runtime,location,timers) {
             return;
         }
         if (action === 'start') {
+            // The extension's closed flag can arrive before its onclose callback.
+            if (fallbackPlayerTab?.closed === true && typeof fallbackPlayerTab.onclose === 'function') {
+                fallbackPlayerTab.onclose();
+                state = getState();
+            }
             // Start must not retire a player that is still alive or still processing Stop.
             const priorHeartbeat = getPlayerHeartbeat();
             const retryAbandonedCheck = ['refresh-delay','checking-progress'].includes(state.phase)
@@ -1648,9 +1658,28 @@ function createSessionRequest(native,page,runtime,location,timers) {
             const managedAlive = fallbackPlayerTab && fallbackPlayerTab.closed !== true;
             const stopPending = state.currentLessonKey && state.stopRequestAt && Date.now()-state.stopRequestAt < 30000;
             if (heartbeatAlive || managedAlive || stopPending) {
-                updateState({message:managedAlive ? '播放器标签页尚未确认关闭，请检查对应视频页' : heartbeatAlive ? '仍收到播放器心跳；暂停后恢复请点继续' : `正在等待停止指令处理，还需约 ${Math.max(1,Math.ceil((30000-(Date.now()-state.stopRequestAt))/1000))} 秒，再点开始`});
+                const waitMs = Math.max(heartbeatAlive ? 30000-(Date.now()-Number(heartbeat.at)) : 0,
+                    stopPending ? 30000-(Date.now()-state.stopRequestAt) : 0) + 250;
+                updateState({message:managedAlive ? '播放器标签页尚未确认关闭，请检查对应视频页' :
+                    `已收到开始请求，等待旧播放器心跳或停止指令失效（约 ${Math.ceil(waitMs/1000)} 秒），随后自动重试；暂停或停止可取消`});
                 debugLog('warn','start-blocked-existing-player',{heartbeatAlive:Boolean(heartbeatAlive),
                     managedAlive:Boolean(managedAlive),stopPending:Boolean(stopPending)});
+                if (!managedAlive) {
+                    const expected = JSON.stringify([state.status,state.phase,state.currentLessonKey,state.stopRequestAt]);
+                    pendingStartTimer = setTimeout(() => {
+                        pendingStartTimer = null;
+                        const latest = getState();
+                        if (!accountRuntime.guard() || JSON.stringify([latest.status,latest.phase,latest.currentLessonKey,latest.stopRequestAt]) !== expected) return;
+                        const current = getPlayerHeartbeat();
+                        if (current && Date.now()-Number(current.at || 0) < 30000) {
+                            updateState({message:'播放器仍在发送新心跳，未新开视频；请检查对应视频页，暂停恢复请点继续'});
+                            debugLog('warn','start-retry-player-still-alive',{heartbeatAgeMs:Date.now()-Number(current.at || 0)});
+                            return;
+                        }
+                        debugLog('info','start-retry-after-player-silence',{});
+                        handlePanelAction('start');
+                    },waitMs);
+                }
                 return;
             }
             const freshRun = ['idle', 'stopped', 'complete'].includes(state.status);
@@ -3971,7 +4000,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.46",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.47",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

@@ -615,3 +615,49 @@ test('multiple lesson titles in a player body are not proof of actual course ide
  h.context.document.title='下一节';
  assert.equal(h.api.detectVisiblePlayerLessonTitle(h.api.getState()),'下一节');
 });
+test('start after confirmed tab close ignores its residual heartbeat and stop grace',()=>{
+ const h=boot({...active,status:'stopped',phase:'stopped'});
+ h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey,sessionId:'closed-player'});
+ const tab={closed:false};h.api.trackManagedPlayerTab(tab);
+ h.values.set(STATE,{...h.api.getState(),stopRequestAt:h.now()});
+ tab.closed=true;
+ h.api.handlePanelAction('start');
+ assert.equal(h.api.getState().status,'running');
+});
+
+test('start with only a residual heartbeat waits then retries without another click',()=>{
+ const h=boot({...active,status:'stopped',phase:'stopped'});
+ h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey,sessionId:'closed-player'});
+ h.api.handlePanelAction('start');
+ assert.equal(h.api.getState().status,'stopped');
+ h.advance(31000);
+ for(const [id,timer] of [...h.timers]) {h.timers.delete(id);timer.fn();}
+ assert.equal(h.api.getState().status,'running');
+});
+
+test('pending start never opens over renewed heartbeat or a live managed tab',()=>{
+ const h=boot({...active,status:'stopped',phase:'stopped'});
+ h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey,sessionId:'live-player'});
+ h.api.handlePanelAction('start');h.advance(31000);
+ h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey,sessionId:'live-player'});
+ for(const [id,timer] of [...h.timers]) {h.timers.delete(id);timer.fn();}
+ assert.equal(h.api.getState().status,'stopped');
+ assert.match(h.api.getState().message,/新心跳/);
+ assert.equal(h.opened.length,0);
+ const other=boot({...active,status:'stopped',phase:'stopped'});
+ other.api.trackManagedPlayerTab({closed:false});other.api.handlePanelAction('start');
+ assert.equal(other.api.getState().status,'stopped');assert.equal(other.timers.size,0);
+});
+
+test('pause or stop cancels pending start; changed task cannot be restarted by old request',()=>{
+ for(const action of ['pause','stop','task-change']) {
+  const h=boot({...active,status:'stopped',phase:'stopped'});
+  h.values.set(HEARTBEAT,{at:h.now(),lessonKey:active.currentLessonKey,sessionId:'old-player'});
+  h.api.handlePanelAction('start');
+  if(action==='task-change')h.values.set(STATE,{...h.api.getState(),currentLessonKey:'another-lesson'});
+  else h.api.handlePanelAction(action);
+  h.advance(31000);
+  for(const [id,timer] of [...h.timers]) {h.timers.delete(id);timer.fn();}
+  assert.notEqual(h.api.getState().status,'running');assert.equal(h.opened.length,0);
+ }
+});
