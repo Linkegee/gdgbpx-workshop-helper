@@ -2668,13 +2668,10 @@
             && event.detectedLessonKey && event.detectedLessonKey !== state.currentLessonKey
             && state.status === 'running' && ['opening-video','watching-video'].includes(state.phase)) {
             updateState({status:'paused',phase:'player-lesson-mismatch',
-                message:'播放器显示的课程与当前课程不一致，已暂停；请关闭该播放器并重新检查'});
+                message:'播放器课程与当前任务不一致，助手已暂停并保留播放器；请核对课程后重新检查'});
             debugLog('error','active-player-lesson-mismatch',{
                 expectedLessonKey:state.currentLessonKey,detectedLessonKey:event.detectedLessonKey});
-            if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
-                try { fallbackPlayerTab.close(); }
-                catch (error) { debugLog('warn','mismatched-player-close-failed',{error}); }
-            }
+            // Preserve the mismatched player: title evidence does not authorize closing a tab.
             return;
         }
 
@@ -2965,7 +2962,7 @@
         if (playerIdentityMismatchClosing || state.status !== 'running'
             || !['opening-video', 'watching-video'].includes(state.phase)) return;
         playerIdentityMismatchClosing = true;
-        debugLog('error', 'player-identity-mismatch-closing', {
+        debugLog('error', 'player-identity-mismatch-preserved', {
             expectedLessonKey: state.currentLessonKey,
             expectedLessonTitle: state.currentLessonTitle,
             detectedLessonKey: detectedKey,
@@ -2978,7 +2975,7 @@
             detectedLessonKey: detectedKey,
             detectedLessonTitle: detectedTitle
         });
-        setTimeout(() => closePlayerWindow('player-identity-mismatch'), 0);
+        // Report the mismatch only. The controller pauses without destroying the player.
     }
 
     function maybePublishVerifiedVideoStarted(video) {

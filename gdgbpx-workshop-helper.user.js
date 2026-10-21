@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.43
+// @version      1.5.44
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -3046,13 +3046,10 @@ function createSessionRequest(native,page,runtime,location,timers) {
             && event.detectedLessonKey && event.detectedLessonKey !== state.currentLessonKey
             && state.status === 'running' && ['opening-video','watching-video'].includes(state.phase)) {
             updateState({status:'paused',phase:'player-lesson-mismatch',
-                message:'播放器显示的课程与当前课程不一致，已暂停；请关闭该播放器并重新检查'});
+                message:'播放器课程与当前任务不一致，助手已暂停并保留播放器；请核对课程后重新检查'});
             debugLog('error','active-player-lesson-mismatch',{
                 expectedLessonKey:state.currentLessonKey,detectedLessonKey:event.detectedLessonKey});
-            if (fallbackPlayerTab && typeof fallbackPlayerTab.close === 'function') {
-                try { fallbackPlayerTab.close(); }
-                catch (error) { debugLog('warn','mismatched-player-close-failed',{error}); }
-            }
+            // Preserve the mismatched player: title evidence does not authorize closing a tab.
             return;
         }
 
@@ -3343,7 +3340,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         if (playerIdentityMismatchClosing || state.status !== 'running'
             || !['opening-video', 'watching-video'].includes(state.phase)) return;
         playerIdentityMismatchClosing = true;
-        debugLog('error', 'player-identity-mismatch-closing', {
+        debugLog('error', 'player-identity-mismatch-preserved', {
             expectedLessonKey: state.currentLessonKey,
             expectedLessonTitle: state.currentLessonTitle,
             detectedLessonKey: detectedKey,
@@ -3356,7 +3353,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
             detectedLessonKey: detectedKey,
             detectedLessonTitle: detectedTitle
         });
-        setTimeout(() => closePlayerWindow('player-identity-mismatch'), 0);
+        // Report the mismatch only. The controller pauses without destroying the player.
     }
 
     function maybePublishVerifiedVideoStarted(video) {
@@ -3939,7 +3936,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.43",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.44",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

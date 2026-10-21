@@ -69,7 +69,7 @@ function boot(saved, values = new Map()) {
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
             writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,handlePlayerCloseRequest,closePlayerWindow,
             setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
-            attemptPlayerStart, playerTick, recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
+            closeMismatchedPlayer, attemptPlayerStart, playerTick, recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
         installGlobalErrorLogging();`);
     vm.runInNewContext(instrumented, context);
@@ -555,4 +555,17 @@ test('media that never started receives bounded in-place recovery without openin
     const h=boot(active),v=retryVideo(h);
     h.api.playerTick();h.advance(181000);h.api.playerTick();
     assert.equal(v.loads,1);assert.equal(h.opened.length,0);
+});
+
+test('lesson mismatch preserves player for inspection and never closes managed tab',()=>{
+ const h=boot({...active,phase:'opening-video'});let closes=0;
+ h.api.setManagedTab({close(){closes++;}});
+ h.api.handlePlayerEvent({id:'preserve-mismatch',type:'player-identity-mismatch',
+ expectedLessonKey:active.currentLessonKey,detectedLessonKey:'class-1::other',at:h.now()});
+ assert.equal(h.api.getState().status,'paused');assert.equal(closes,0);
+});
+test('player-side mismatch reports without scheduling destructive close',()=>{
+ const h=boot({...active,phase:'opening-video'});
+ h.api.closeMismatchedPlayer(h.api.getState(),'class-1::other','other');
+ assert.equal([...h.timers.values()].filter(t=>t.delay===0).length,0);
 });
