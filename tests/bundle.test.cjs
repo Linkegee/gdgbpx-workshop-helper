@@ -62,11 +62,11 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.45/);
+    assert.match(source,/@version\s+1\.5\.46/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');
-    assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').trim());
+    assert.equal(require('./load-core.cjs').loadCore().trim(),fs.readFileSync(path.join(__dirname,'../src/helper.js'),'utf8').replace(/\r\n/g,'\n').replace('null /* SCRIPT_VERSION */',JSON.stringify(source.match(/@version\s+(\S+)/)[1])).trim());
 });
 
 test('hidden homepage password field does not invalidate a logged-in tab; visible login still blocks',async()=>{
@@ -341,4 +341,10 @@ test('main export includes matching player recorder and a broken buffer does not
  player.document.querySelector=()=>({buffered:{length:1,start(){throw Error('detached');}}});
  assert.doesNotThrow(()=>player.testApi.recordFlightSample('sample'));
  assert.equal(main.testApi.diagnosticBundle().flightRecorder.player.samples.length,1);
+});
+test('displayed runtime version equals userscript install version',()=>{
+ const built=require('node:fs').readFileSync(require('node:path').join(__dirname,'../gdgbpx-workshop-helper.user.js'),'utf8');
+ const installed=built.match(/@version\s+(\S+)/)[1];
+ const runtime=built.match(/const VERSION = ['"]([^'"]+)['"]/)[1];
+ assert.equal(runtime,installed);
 });
