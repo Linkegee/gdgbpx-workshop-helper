@@ -2061,6 +2061,24 @@
             });
         }
         if (confirmServerCompletion(lesson, 'live-server-status-probe')) return;
+        // A title-less media frame may never publish verified video-started.
+        // Independently confirmed server progress plus current media activity is
+        // sufficient to leave startup, without relaxing player event identity checks.
+        const heartbeat = getPlayerHeartbeat();
+        if (state.status === 'running' && state.phase === 'opening-video' && !state.maintenance
+            && accountRuntime.guard() && accountRuntime.checkCourseAuth(mainAuth)
+            && lesson.progress > Math.max(Number(state.currentLessonProgress || 0),Number(state.beforeProgress || 0))
+            && heartbeat?.lessonKey === state.currentLessonKey
+            && heartbeat.sessionId && Number(heartbeat.at) >= state.lastActionAt
+            && Date.now()-Number(heartbeat.at) >= 0 && Date.now()-Number(heartbeat.at) < 15000
+            && heartbeat.mediaFresh && heartbeat.paused === false
+            && Number(heartbeat.currentTime) > 0 && Number(heartbeat.duration) > Number(heartbeat.currentTime)) {
+            updateState({phase:'watching-video',message:'服务器进度与播放器心跳已确认正在观看'});
+            debugLog('info','player-start-confirmed-by-server-progress',{
+                lessonKey:state.currentLessonKey,fromProgress:state.currentLessonProgress,
+                progress:lesson.progress,currentTime:heartbeat.currentTime,mediaAgeMs:heartbeat.mediaAgeMs
+            });
+        }
         if (state.currentLessonProgress !== lesson.progress) {
             updateState({ currentLessonProgress: lesson.progress });
             debugLog('info', 'panel-progress-synced-from-live-probe', {

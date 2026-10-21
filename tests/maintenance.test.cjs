@@ -661,3 +661,32 @@ test('pause or stop cancels pending start; changed task cannot be restarted by o
   assert.notEqual(h.api.getState().status,'running');assert.equal(h.opened.length,0);
  }
 });
+
+test('verified live server progress and playing media prevent false five-minute startup pause',()=>{
+ const h=boot({...active,phase:'opening-video',currentLessonProgress:0,beforeProgress:0,fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+ readyDetail(h,[{title:'测试课程',progress:0,status:'未完成'}]);
+ const probe=boot();readyDetail(probe,[{title:'测试课程',progress:12.9,status:'未完成'}]);
+ h.advance(270000);
+ const heartbeat={lessonKey:active.currentLessonKey,sessionId:'playing-instance',at:h.now()};
+ h.values.set(HEARTBEAT,heartbeat);
+ h.values.set('gdgbpx_workshop_helper_media_heartbeat_v2',{...heartbeat,currentTime:260,duration:1871,paused:false});
+ h.api.setProbe(probe.context.document);h.api.readServerStatusProbeDocument();
+ assert.equal(h.api.getState().phase,'watching-video');
+ h.advance(31000);h.api.handleDetailPage(h.api.getState());
+ assert.equal(h.api.getState().status,'running');assert.equal(h.opened.length,0);
+});
+
+test('server-assisted startup requires matching fresh playing media and verified progress',()=>{
+ for(const scenario of ['paused-user','wrong-account','wrong-lesson','wrong-session','stale-media','paused-video','no-progress','guard-rejects']) {
+  const h=boot({...active,status:scenario==='paused-user'?'paused':'running',phase:'opening-video',currentLessonProgress:0,beforeProgress:0,fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+  readyDetail(h,[{title:'测试课程',progress:0,status:'未完成'}]);
+  const probe=boot();readyDetail(probe,[{title:'测试课程',progress:scenario==='no-progress'?0:12.9,status:'未完成'}],scenario==='wrong-account'?'different-account':'test-only');
+  h.advance(270000);
+  const heartbeat={lessonKey:scenario==='wrong-lesson'?'another-course':active.currentLessonKey,sessionId:'playing-instance',at:h.now()};
+  h.values.set(HEARTBEAT,heartbeat);
+  h.values.set('gdgbpx_workshop_helper_media_heartbeat_v2',{...heartbeat,sessionId:scenario==='wrong-session'?'another-session':heartbeat.sessionId,at:h.now()-(scenario==='stale-media'?20000:0),currentTime:260,duration:1871,paused:scenario==='paused-video'});
+  if(scenario==='guard-rejects')h.context.accountRuntime={...h.context.accountRuntime,checkCourseAuth:()=>false};
+  h.api.setProbe(probe.context.document);h.api.readServerStatusProbeDocument();
+  assert.equal(h.api.getState().phase,'opening-video',scenario);assert.equal(h.opened.length,0);
+ }
+});

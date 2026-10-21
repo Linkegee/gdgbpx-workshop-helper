@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.47
+// @version      1.5.48
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -379,7 +379,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.47";
+    const VERSION = "1.5.48";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -2439,6 +2439,24 @@ function createSessionRequest(native,page,runtime,location,timers) {
             });
         }
         if (confirmServerCompletion(lesson, 'live-server-status-probe')) return;
+        // A title-less media frame may never publish verified video-started.
+        // Independently confirmed server progress plus current media activity is
+        // sufficient to leave startup, without relaxing player event identity checks.
+        const heartbeat = getPlayerHeartbeat();
+        if (state.status === 'running' && state.phase === 'opening-video' && !state.maintenance
+            && accountRuntime.guard() && accountRuntime.checkCourseAuth(mainAuth)
+            && lesson.progress > Math.max(Number(state.currentLessonProgress || 0),Number(state.beforeProgress || 0))
+            && heartbeat?.lessonKey === state.currentLessonKey
+            && heartbeat.sessionId && Number(heartbeat.at) >= state.lastActionAt
+            && Date.now()-Number(heartbeat.at) >= 0 && Date.now()-Number(heartbeat.at) < 15000
+            && heartbeat.mediaFresh && heartbeat.paused === false
+            && Number(heartbeat.currentTime) > 0 && Number(heartbeat.duration) > Number(heartbeat.currentTime)) {
+            updateState({phase:'watching-video',message:'服务器进度与播放器心跳已确认正在观看'});
+            debugLog('info','player-start-confirmed-by-server-progress',{
+                lessonKey:state.currentLessonKey,fromProgress:state.currentLessonProgress,
+                progress:lesson.progress,currentTime:heartbeat.currentTime,mediaAgeMs:heartbeat.mediaAgeMs
+            });
+        }
         if (state.currentLessonProgress !== lesson.progress) {
             updateState({ currentLessonProgress: lesson.progress });
             debugLog('info', 'panel-progress-synced-from-live-probe', {
@@ -4000,7 +4018,7 @@ function createSessionRequest(native,page,runtime,location,timers) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.47",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.48",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
