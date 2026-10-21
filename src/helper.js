@@ -964,6 +964,15 @@
             if (minutes === null) return;
             progressNotifier.configure(key.trim(),Number(minutes));
         });
+        GM_registerMenuCommand('发送 Bark 测试通知', () => progressNotifier.test(result => {
+            debugLog('info','bark-test-result',{result});
+            const messages={accepted:'Bark 接口已接收，请检查手机是否收到“学院助手 Bark 测试”。',
+                rejected:'Bark 接口未接受请求，请检查 Bark 配置。',
+                'not-configured':'尚未配置 Bark，请先安装本机私有版本或使用“设置 Bark 进度提醒”。',
+                'rate-limited':'刚发送过测试，请至少等 30 秒再试。',
+                'delivery-unknown':'发送结果未知（网络错误或超时），请先检查手机，避免重复发送。'};
+            alert(messages[result] || '测试结果未知');
+        }));
         setInterval(() => progressNotifier.tick(getState()),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {

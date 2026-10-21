@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.49
+// @version      1.5.50
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -306,6 +306,21 @@ function createSessionRequest(native,page,runtime,location,timers) {
 // Local progress monitoring: no model calls and no credentials in diagnostics.
 function createProgressNotifier(api, scope, clock = Date.now) {
     const configKey='gdgbpx_bark_config_v1', ledgerKey='gdgbpx_bark_watch_v1:'+scope;
+    function send(config,title,body,finish) {
+        try {api.GM_xmlhttpRequest({method:'POST',url:'https://api.day.app/push',timeout:15000,
+            headers:{'Content-Type':'application/json'},data:JSON.stringify({device_key:config.key,title,body,group:'干部学院',isArchive:'1'}),
+            onload:r=>{let ok=false;try{ok=r.status===200 && JSON.parse(r.responseText).code===200;}catch(_){}finish(ok?'accepted':'rejected');},
+            onerror:()=>finish('delivery-unknown'),ontimeout:()=>finish('delivery-unknown')});
+        }catch(_){finish('delivery-unknown');}
+    }
+    function test(finish) {
+        const config=api.GM_getValue(configKey,null);
+        if(!config || !/^[A-Za-z0-9_-]+$/.test(config.key||'')){finish('not-configured');return;}
+        const key='gdgbpx_bark_test_at_v1',now=clock(),last=api.GM_getValue(key,null);
+        if(last!==null && now-last>=0 && now-last<30000){finish('rate-limited');return;}
+        api.GM_setValue(key,now);
+        send(config,'学院助手 Bark 测试','这是你手动发送的测试通知。收到表示浏览器到手机的 Bark 推送链路可用；不会暂停课程或改变进度提醒计时。',finish);
+    }
     function tick(state) {
         const config=api.GM_getValue(configKey,null);
         if(!config || !/^[A-Za-z0-9_-]+$/.test(config.key||''))return;
@@ -321,14 +336,10 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         const reserved={...previous,sent:true,result:'attempting',at:now};
         api.GM_setValue(ledgerKey,reserved);
         const finish=result=>{const latest=api.GM_getValue(ledgerKey,null);if(latest?.at===now && latest?.lesson===reserved.lesson)api.GM_setValue(ledgerKey,{...latest,result});};
-        try {api.GM_xmlhttpRequest({method:'POST',url:'https://api.day.app/push',timeout:15000,
-            headers:{'Content-Type':'application/json'},data:JSON.stringify({device_key:config.key,title:'学院学习进度未更新',
-                body:`账号标识：${scope.slice(0,8)}\n课程：${state.currentLessonTitle||'未知'}\n服务器进度：${progress}%\n已约 ${Math.floor((now-previous.since)/60000)} 分钟无增长。\n状态：${state.phase}；请查看学院页面或下载日志交给 Codex 排查。`,group:'干部学院',isArchive:'1'}),
-            onload:r=>{let ok=false;try{ok=r.status===200 && JSON.parse(r.responseText).code===200;}catch(_){}finish(ok?'accepted':'rejected');},
-            onerror:()=>finish('delivery-unknown'),ontimeout:()=>finish('delivery-unknown')});
-        }catch(_){finish('delivery-unknown');}
+        send(config,'学院学习进度未更新',
+            `账号标识：${scope.slice(0,8)}\n课程：${state.currentLessonTitle||'未知'}\n服务器进度：${progress}%\n已约 ${Math.floor((now-previous.since)/60000)} 分钟无增长。\n状态：${state.phase}；请查看学院页面或下载日志交给 Codex 排查。`,finish);
     }
-    return {tick,configure(key,minutes=10){
+    return {tick,test,configure(key,minutes=10){
         if(key && !/^[A-Za-z0-9_-]+$/.test(key))throw new Error('Bark key 格式无效');
         if(key)api.GM_setValue(configKey,{key,minutes:Math.max(3,Math.min(120,Number(minutes)||10))});
         else api.GM_deleteValue(configKey);
@@ -416,7 +427,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.49";
+    const VERSION = "1.5.50";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -1379,6 +1390,15 @@ function createProgressNotifier(api, scope, clock = Date.now) {
             if (minutes === null) return;
             progressNotifier.configure(key.trim(),Number(minutes));
         });
+        GM_registerMenuCommand('发送 Bark 测试通知', () => progressNotifier.test(result => {
+            debugLog('info','bark-test-result',{result});
+            const messages={accepted:'Bark 接口已接收，请检查手机是否收到“学院助手 Bark 测试”。',
+                rejected:'Bark 接口未接受请求，请检查 Bark 配置。',
+                'not-configured':'尚未配置 Bark，请先安装本机私有版本或使用“设置 Bark 进度提醒”。',
+                'rate-limited':'刚发送过测试，请至少等 30 秒再试。',
+                'delivery-unknown':'发送结果未知（网络错误或超时），请先检查手机，避免重复发送。'};
+            alert(messages[result] || '测试结果未知');
+        }));
         setInterval(() => progressNotifier.tick(getState()),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
@@ -4065,7 +4085,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.49",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.50",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
