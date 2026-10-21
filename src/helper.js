@@ -2648,6 +2648,34 @@
         }
     }
 
+    function reconcilePlayerLesson(event, state) {
+        const age = Date.now() - Number(event.at || 0);
+        const heartbeat = getPlayerHeartbeat();
+        if (!isDetailRoute() || age < 0 || age > 15000 || event.at < state.lastActionAt
+            || !event.playerSessionId || heartbeat?.sessionId !== event.playerSessionId
+            || Date.now() - Number(heartbeat.at || 0) > 15000
+            || heartbeat.lessonKey !== event.detectedLessonKey
+            || event.detectedLessonKey !== lessonKey(state.currentClassId, event.detectedLessonTitle)
+            || state.serverCompletedLessonKeys.includes(event.detectedLessonKey)
+            || state.skippedLessonKeys.includes(event.detectedLessonKey)) return false;
+        const pageDocument = typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : document;
+        const auth = readCourseAuth(pageDocument);
+        if (!auth || !accountRuntime.checkCourseAuth(auth)) return false;
+        const matches = readLessons().filter(item => item.title === event.detectedLessonTitle);
+        if (matches.length !== 1 || matches[0].complete || matches[0].status !== '未完成') return false;
+        const actual = matches[0];
+        stopServerStatusMonitor('player-lesson-reconciled');
+        updateState({ phase: 'watching-video', currentLessonKey: event.detectedLessonKey,
+            currentLessonTitle: actual.title, currentLessonProgress: actual.progress,
+            beforeProgress: actual.progress, refreshAttempts: 0, openAttempts: 0,
+            maintenanceResumeLessonKey: state.maintenanceResumeLessonKey || state.currentLessonKey,
+            message: '已核对同专题实际播放课程，继续学习；完成后返回遗漏课程', lastActionAt: Date.now() });
+        if (fallbackPlayerTab) trackManagedPlayerTab(fallbackPlayerTab);
+        debugLog('info', 'player-lesson-reconciled', { expectedLessonKey: state.currentLessonKey,
+            actualLessonKey: event.detectedLessonKey, progress: actual.progress });
+        return true;
+    }
+
     function handlePlayerEvent(event) {
         if (!accountRuntime.guard()) return;
         if (!event || !event.id || event.id === lastHandledEventId) return;
@@ -2667,6 +2695,7 @@
             && event.expectedLessonKey === state.currentLessonKey
             && event.detectedLessonKey && event.detectedLessonKey !== state.currentLessonKey
             && state.status === 'running' && ['opening-video','watching-video'].includes(state.phase)) {
+            if (reconcilePlayerLesson(event, state)) return;
             updateState({status:'paused',phase:'player-lesson-mismatch',
                 message:'播放器课程与当前任务不一致，助手已暂停并保留播放器；请核对课程后重新检查'});
             debugLog('error','active-player-lesson-mismatch',{
@@ -2919,7 +2948,10 @@
             Array.isArray(state.currentWorkshopLessonTitles) ? state.currentWorkshopLessonTitles : [],
             state.currentLessonTitle
         ).filter(Boolean).sort((left, right) => right.length - left.length);
-        return candidates.find((title) => visibleText.includes(normalizeText(title))) || '';
+        const exactDocumentTitle = candidates.find(title => normalizeText(title) === normalizeText(document.title));
+        if (exactDocumentTitle && visibleText.includes(normalizeText(exactDocumentTitle))) return exactDocumentTitle;
+        const matches = candidates.filter(title => visibleText.includes(normalizeText(title)));
+        return matches.length === 1 ? matches[0] : '';
     }
 
     function syncPlayerIdentityFromVisibleTitle(state = getState()) {
@@ -2933,6 +2965,7 @@
         const expectedKey = state.currentLessonKey || '';
         const identityMatches = !expectedKey || detectedKey === expectedKey;
         playerIdentityVerified = identityMatches;
+        if (identityMatches) playerIdentityMismatchClosing = false;
         if (detectedKey === playerLessonKey) {
             if (!identityMatches) closeMismatchedPlayer(state, detectedKey, detectedTitle);
             return identityMatches;
@@ -2962,6 +2995,8 @@
         if (playerIdentityMismatchClosing || state.status !== 'running'
             || !['opening-video', 'watching-video'].includes(state.phase)) return;
         playerIdentityMismatchClosing = true;
+        // Publish identity and liveness together so the controller can verify this session.
+        writePlayerHeartbeat(true);
         debugLog('error', 'player-identity-mismatch-preserved', {
             expectedLessonKey: state.currentLessonKey,
             expectedLessonTitle: state.currentLessonTitle,

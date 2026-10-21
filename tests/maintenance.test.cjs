@@ -69,7 +69,7 @@ function boot(saved, values = new Map()) {
             setPlayer(video) { playerVideo = video; }, applyPlayerState,
             writePlayerHeartbeat,getPlayerHeartbeat,confirmServerCompletion,handlePlayerCloseRequest,closePlayerWindow,
             setIdentity() { playerLessonKey = 'class-1::测试课程'; playerSessionId = 'same-player'; },
-            closeMismatchedPlayer, attemptPlayerStart, playerTick, recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
+            detectVisiblePlayerLessonTitle, confirmCompletedPlayerClosed, closeMismatchedPlayer, attemptPlayerStart, playerTick, recoverStalledMedia,trackManagedPlayerTab, handleDetailPage, setManagedTab(tab) { fallbackPlayerTab = tab; }
         }; return;
         installGlobalErrorLogging();`);
     vm.runInNewContext(instrumented, context);
@@ -568,4 +568,50 @@ test('player-side mismatch reports without scheduling destructive close',()=>{
  const h=boot({...active,phase:'opening-video'});
  h.api.closeMismatchedPlayer(h.api.getState(),'class-1::other','other');
  assert.equal([...h.timers.values()].filter(t=>t.delay===0).length,0);
+});
+
+function mismatchFixture(overrides={}) {
+ const h=boot({...active,phase:'opening-video',lastActionAt:1_800_000_000_000-1000,...overrides});
+ readyDetail(h,[{title:'测试课程',progress:25,status:'未完成'},{title:'下一节',progress:12,status:'未完成'}]);
+ h.values.set(HEARTBEAT,{at:h.now(),sessionId:'current-session',lessonKey:'class-1::下一节'});
+ return h;
+}
+function mismatchEvent(h,overrides={}) {return {id:'align',type:'player-identity-mismatch',at:h.now(),
+ expectedLessonKey:active.currentLessonKey,detectedLessonKey:'class-1::下一节',detectedLessonTitle:'下一节',
+ playerSessionId:'current-session',...overrides};}
+test('verified same-account unfinished lesson is adopted without closing, skipping or opening a player',()=>{
+ const h=mismatchFixture();let closed=0;const tab={close(){closed++;}};h.api.setManagedTab(tab);
+ h.api.handlePlayerEvent(mismatchEvent(h));const s=h.api.getState();
+ assert.equal(s.status,'running');assert.equal(s.phase,'watching-video');assert.equal(s.currentLessonKey,'class-1::下一节');
+ assert.equal(s.beforeProgress,12);assert.equal(s.maintenanceResumeLessonKey,active.currentLessonKey);
+ assert.equal(s.serverCompletedLessonKeys.length,0);assert.equal(s.skippedLessonKeys.length,0);
+ assert.equal(closed,0);assert.equal(h.opened.length,0);
+ tab.onclose();assert.equal(h.api.getState().phase,'player-manually-closed');
+});
+test('mismatch reconciliation rejects stale, foreign-session, completed and unverified-account evidence',()=>{
+ for(const variant of ['stale','session','completed','auth','paused']){
+  const h=mismatchFixture(variant==='paused'?{status:'paused'}:{});
+  if(variant==='auth')h.context.accountRuntime={...h.context.accountRuntime,checkCourseAuth:()=>false};
+  if(variant==='completed')readyDetail(h,[{title:'下一节',progress:100,status:'已完成'}]);
+  const event=mismatchEvent(h,variant==='stale'?{at:h.now()-60000}:variant==='session'?{playerSessionId:'old-session'}:{});
+  h.api.handlePlayerEvent(event);assert.equal(h.api.getState().currentLessonKey,active.currentLessonKey,variant);
+  assert.equal(h.opened.length,0);
+ }
+});
+
+test('reconciled lesson completion returns to original unfinished lesson',()=>{
+ const h=mismatchFixture();h.api.handlePlayerEvent(mismatchEvent(h));
+ readyDetail(h,[{title:'测试课程',progress:25,status:'未完成'},{title:'下一节',progress:100,status:'已完成'}]);
+ h.values.delete(HEARTBEAT);
+ h.api.confirmCompletedPlayerClosed(h.api.getState(),'fixture-server-completed-and-closed');
+ h.api.handleDetailPage(h.api.getState());
+ assert.equal(h.api.getState().currentLessonKey,active.currentLessonKey);
+ assert.equal(h.api.getState().phase,'opening-video');assert.equal(h.opened.length,1);
+});
+test('multiple lesson titles in a player body are not proof of actual course identity',()=>{
+ const h=boot({...active,currentWorkshopLessonTitles:['测试课程','下一节']});
+ h.context.document.body.innerText='测试课程 推荐 下一节';
+ assert.equal(h.api.detectVisiblePlayerLessonTitle(h.api.getState()),'');
+ h.context.document.title='下一节';
+ assert.equal(h.api.detectVisiblePlayerLessonTitle(h.api.getState()),'下一节');
 });
