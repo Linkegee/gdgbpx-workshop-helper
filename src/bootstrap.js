@@ -80,9 +80,19 @@
         /* HELPER_CORE */
     } catch(error) {
         await ready();
+        const unboundPlayer = error?.code === 'PLAYER_UNBOUND';
+        // A manually opened video can play normally without helper ownership.
+        // Do not cover it with duplicate error banners from every frame.
+        if (unboundPlayer && window.top !== window) return;
         const node=document.createElement('div');node.setAttribute('role','alert');
         node.style.cssText='position:fixed;left:0;bottom:0;z-index:2147483647;background:white;color:#a40000;padding:12px;border:1px solid red';
-        node.textContent='学习助手未启动：'+error.message;
+        if (unboundPlayer) {
+            node.setAttribute('role','status');
+            node.style.color='#444';node.style.borderColor='#aaa';
+        }
+        node.textContent=unboundPlayer
+            ? '此播放器未与助手绑定，助手不会控制播放或读取进度；此提示不代表网站播放失败。需要自动管理时，请从对应专题页的助手启动。'
+            : '学习助手未启动：'+error.message;
         recordBootstrap('bootstrap-failed', {errorType:error?.name || 'Error'});
         const download=document.createElement('button');
         download.textContent='下载启动诊断';

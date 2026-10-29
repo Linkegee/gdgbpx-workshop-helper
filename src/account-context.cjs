@@ -76,10 +76,13 @@ async function createAccountRuntime(api, env) {
     }
     if (!validScope(tab[TAB_SLOT])) {
         trace('player-scope-missing', {directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)});
-        throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+        const error = new Error('无法确认播放器所属账号；请从对应主页面启动');
+        error.code = 'PLAYER_UNBOUND';
+        throw error;
     }
     const scope = {...tab[TAB_SLOT]};
     let blockedReason = '';
+    let ownershipEvidence = null;
     let blocked = false, pending = false, authPending = false, checkedAuth = '', authClaimKey = '';
     function invalidate(message = '登录会话已变化，已停止旧任务；刷新页面后重新开始') {
         if (blocked) return;
@@ -97,8 +100,11 @@ async function createAccountRuntime(api, env) {
         try {
             if (authClaimKey) {
                 const claim = api.GM_getValue(authClaimKey, null);
-                if (claim?.conflict || (claim && claim.owner !== scope.ownerFingerprint)) {
-                    invalidate('检测到不同账号共用课程授权，存在会话冲突；已停止，请使用独立浏览器配置');
+                if (!claim || !(claim.expiresAt > env.now())) {
+                    // Cached checks must not outlive the claim they validated.
+                    checkedAuth = ''; authClaimKey = '';
+                } else if (claim.conflict || claim.owner !== scope.ownerFingerprint) {
+                    invalidate('课程授权与已保存的账号记录冲突，助手已停止；请核对账号并从学院首页重新进入。此提示不能单独证明浏览器隔离失败');
                     return false;
                 }
             }
@@ -144,14 +150,23 @@ async function createAccountRuntime(api, env) {
             const key = 'gdgbpxCourseOwnerV1:' + fingerprint;
             const previous = api.GM_getValue(key, null);
             const live = previous && previous.expiresAt > env.now();
+            const conflict = Boolean(live && (previous.conflict || previous.owner !== scope.ownerFingerprint));
+            ownershipEvidence = {
+                previousPresent:Boolean(previous), previousLive:Boolean(live),
+                ownerMatches:previous ? previous.owner === scope.ownerFingerprint : null,
+                previousConflict:Boolean(previous?.conflict),
+                previousExpiresAt:previous?.expiresAt || null,
+                checkedAt:env.now(), conflict
+            };
             api.GM_setValue(key, {
                 owner: live ? previous.owner : scope.ownerFingerprint,
-                conflict: Boolean(live && (previous.conflict || previous.owner !== scope.ownerFingerprint)),
-                expiresAt: env.now() + 3600000
+                conflict,
+                // Rejected starts must not keep a historical conflict alive forever.
+                expiresAt: conflict ? previous.expiresAt : env.now() + 3600000
             });
             authClaimKey = key;
             checkedAuth = auth;
-            trace('course-ownership-check-result', {allowed:guard()});
+            trace('course-ownership-check-result', {...ownershipEvidence,allowed:guard()});
         }).catch(() => invalidate('无法核验课程授权归属，已停止任务'))
             .finally(() => { authPending = false; env.onReady?.(); });
         return false;
@@ -175,7 +190,7 @@ async function createAccountRuntime(api, env) {
     return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),
         diagnostics:()=>({accountScope:scope.id,identityKnown:Boolean(scope.ownerFingerprint),
             blocked,blockedReason,identityCheckPending:pending,courseCheckPending:authPending,
-            courseChecked:Boolean(checkedAuth),directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
+            courseChecked:Boolean(checkedAuth),ownershipEvidence:ownershipEvidence && {...ownershipEvidence},directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {

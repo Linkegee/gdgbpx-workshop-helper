@@ -20,6 +20,44 @@ function fixture(values=new Map()) {
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 
+test('repeated rejected starts do not extend a historical authorization conflict',async()=>{
+    const values=new Map(),a=fixture(values),b=fixture(values);
+    let now=1000;
+    a.env.now=b.env.now=()=>now;
+    a.setUid('owner-A');b.setUid('owner-B');
+    const ar=await createAccountRuntime(a.api,a.env);
+    ar.checkCourseAuth('shared-auth');await settle();
+    const key=[...values.keys()].find(key=>key.startsWith('gdgbpxCourseOwnerV1:'));
+    const expiry=values.get(key).expiresAt;
+    now+=10000;
+    const br=await createAccountRuntime(b.api,b.env);
+    br.checkCourseAuth('shared-auth');await settle();
+    assert.equal(br.guard(),false);
+    assert.equal(values.get(key).expiresAt,expiry,'a rejected claimant must not renew the conflict');
+    now+=10000;
+    const retry=await createAccountRuntime(b.api,b.env);
+    retry.checkCourseAuth('shared-auth');await settle();
+    assert.equal(values.get(key).expiresAt,expiry);
+    now=expiry+1;
+    const recovered=await createAccountRuntime(b.api,b.env);
+    recovered.checkCourseAuth('shared-auth');await settle();
+    assert.equal(recovered.checkCourseAuth('shared-auth'),true);
+});
+
+test('cached authorization is rechecked after expiry instead of accepting an expired conflict',async()=>{
+    const f=fixture();let now=1000;f.env.now=()=>now;f.setUid('owner-A');
+    const r=await createAccountRuntime(f.api,f.env);
+    r.checkCourseAuth('auth');await settle();
+    const key=[...f.values.keys()].find(key=>key.startsWith('gdgbpxCourseOwnerV1:'));
+    const old=f.values.get(key);
+    f.values.set(key,{...old,conflict:true});
+    now=old.expiresAt+1;
+    assert.equal(r.checkCourseAuth('auth'),false,'expired authorization needs asynchronous revalidation');
+    await settle();
+    assert.equal(r.checkCourseAuth('auth'),true);
+    assert.equal(f.values.get(key).conflict,false);
+});
+
 test('different account routes sharing course authorization stop both scopes before further work',async()=>{
     const values=new Map(),a=fixture(values),b=fixture(values);
     a.setUid('synthetic-owner-A');b.setUid('synthetic-owner-B');
@@ -90,7 +128,8 @@ test('launch tickets bind a player and its iframe, survive expiry on reload, rej
     href=r.playerUrl('https://cs1.gdgbpx.com/play');
     await assert.rejects(createAccountRuntime(p.api,pe),/归属冲突/);
     const orphan=fixture(values);
-    await assert.rejects(createAccountRuntime(orphan.api,{...pe,href:()=> 'https://cs1.gdgbpx.com/frame'}),/无法确认/);
+    await assert.rejects(createAccountRuntime(orphan.api,{...pe,href:()=> 'https://cs1.gdgbpx.com/frame'}),
+        error=>error.code==='PLAYER_UNBOUND' && /无法确认/.test(error.message));
     await assert.rejects(createAccountRuntime(orphan.api,{...pe,now:()=>999999}),/失效/);
     assert.throws(()=>r.playerUrl('http://cs1.gdgbpx.com/play'),/域名/);
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.55
+// @version      1.5.56
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -157,10 +157,13 @@ async function createAccountRuntime(api, env) {
     }
     if (!validScope(tab[TAB_SLOT])) {
         trace('player-scope-missing', {directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)});
-        throw new Error('无法确认播放器所属账号；请从对应主页面启动');
+        const error = new Error('无法确认播放器所属账号；请从对应主页面启动');
+        error.code = 'PLAYER_UNBOUND';
+        throw error;
     }
     const scope = {...tab[TAB_SLOT]};
     let blockedReason = '';
+    let ownershipEvidence = null;
     let blocked = false, pending = false, authPending = false, checkedAuth = '', authClaimKey = '';
     function invalidate(message = '登录会话已变化，已停止旧任务；刷新页面后重新开始') {
         if (blocked) return;
@@ -178,8 +181,11 @@ async function createAccountRuntime(api, env) {
         try {
             if (authClaimKey) {
                 const claim = api.GM_getValue(authClaimKey, null);
-                if (claim?.conflict || (claim && claim.owner !== scope.ownerFingerprint)) {
-                    invalidate('检测到不同账号共用课程授权，存在会话冲突；已停止，请使用独立浏览器配置');
+                if (!claim || !(claim.expiresAt > env.now())) {
+                    // Cached checks must not outlive the claim they validated.
+                    checkedAuth = ''; authClaimKey = '';
+                } else if (claim.conflict || claim.owner !== scope.ownerFingerprint) {
+                    invalidate('课程授权与已保存的账号记录冲突，助手已停止；请核对账号并从学院首页重新进入。此提示不能单独证明浏览器隔离失败');
                     return false;
                 }
             }
@@ -225,14 +231,23 @@ async function createAccountRuntime(api, env) {
             const key = 'gdgbpxCourseOwnerV1:' + fingerprint;
             const previous = api.GM_getValue(key, null);
             const live = previous && previous.expiresAt > env.now();
+            const conflict = Boolean(live && (previous.conflict || previous.owner !== scope.ownerFingerprint));
+            ownershipEvidence = {
+                previousPresent:Boolean(previous), previousLive:Boolean(live),
+                ownerMatches:previous ? previous.owner === scope.ownerFingerprint : null,
+                previousConflict:Boolean(previous?.conflict),
+                previousExpiresAt:previous?.expiresAt || null,
+                checkedAt:env.now(), conflict
+            };
             api.GM_setValue(key, {
                 owner: live ? previous.owner : scope.ownerFingerprint,
-                conflict: Boolean(live && (previous.conflict || previous.owner !== scope.ownerFingerprint)),
-                expiresAt: env.now() + 3600000
+                conflict,
+                // Rejected starts must not keep a historical conflict alive forever.
+                expiresAt: conflict ? previous.expiresAt : env.now() + 3600000
             });
             authClaimKey = key;
             checkedAuth = auth;
-            trace('course-ownership-check-result', {allowed:guard()});
+            trace('course-ownership-check-result', {...ownershipEvidence,allowed:guard()});
         }).catch(() => invalidate('无法核验课程授权归属，已停止任务'))
             .finally(() => { authPending = false; env.onReady?.(); });
         return false;
@@ -256,7 +271,7 @@ async function createAccountRuntime(api, env) {
     return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),
         diagnostics:()=>({accountScope:scope.id,identityKnown:Boolean(scope.ownerFingerprint),
             blocked,blockedReason,identityCheckPending:pending,courseCheckPending:authPending,
-            courseChecked:Boolean(checkedAuth),directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
+            courseChecked:Boolean(checkedAuth),ownershipEvidence:ownershipEvidence && {...ownershipEvidence},directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {
@@ -462,7 +477,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.55";
+    const VERSION = "1.5.56";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -4131,14 +4146,24 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 // END HELPER CORE
     } catch(error) {
         await ready();
+        const unboundPlayer = error?.code === 'PLAYER_UNBOUND';
+        // A manually opened video can play normally without helper ownership.
+        // Do not cover it with duplicate error banners from every frame.
+        if (unboundPlayer && window.top !== window) return;
         const node=document.createElement('div');node.setAttribute('role','alert');
         node.style.cssText='position:fixed;left:0;bottom:0;z-index:2147483647;background:white;color:#a40000;padding:12px;border:1px solid red';
-        node.textContent='学习助手未启动：'+error.message;
+        if (unboundPlayer) {
+            node.setAttribute('role','status');
+            node.style.color='#444';node.style.borderColor='#aaa';
+        }
+        node.textContent=unboundPlayer
+            ? '此播放器未与助手绑定，助手不会控制播放或读取进度；此提示不代表网站播放失败。需要自动管理时，请从对应专题页的助手启动。'
+            : '学习助手未启动：'+error.message;
         recordBootstrap('bootstrap-failed', {errorType:error?.name || 'Error'});
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.55",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.56",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
