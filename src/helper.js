@@ -717,16 +717,17 @@
         // Export must not replace the failure message or mutate the task state.
     }
 
-    function downloadLogs() {
+    function downloadLogs(automatic = false) {
         const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `gdgbpx-helper-log-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        const prefix=automatic?'gdgbpx-auto-incident':'gdgbpx-helper-log';
+        link.download = `${prefix}-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         document.body.appendChild(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-        debugLog('info', 'logs-downloaded', { entries: getLogs().length });
+        debugLog('info', 'logs-downloaded', { entries: getLogs().length,automatic });
     }
 
     function clearLogs() {
@@ -973,7 +974,10 @@
                 'delivery-unknown':'发送结果未知（网络错误或超时），请先检查手机，避免重复发送。'};
             alert(messages[result] || '测试结果未知');
         }));
-        setInterval(() => progressNotifier.tick(getState()),30000);
+        setInterval(() => progressNotifier.tick(getState(),reason=>{
+            debugLog('warn','automatic-incident-export-requested',{reason});
+            downloadLogs(true);
+        }),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
             handlePlayerEvent(value);

@@ -17,7 +17,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         api.GM_setValue(key,now);
         send(config,'学院助手 Bark 测试','这是你手动发送的测试通知。收到表示浏览器到手机的 Bark 推送链路可用；不会暂停课程或改变进度提醒计时。',finish);
     }
-    function tick(state) {
+    function tick(state,onIncident=()=>{}) {
         const config=api.GM_getValue(configKey,null);
         if(!config || !/^[A-Za-z0-9_-]+$/.test(config.key||''))return;
         const now=clock(), minutes=Math.max(3,Math.min(120,Number(config.minutes)||10));
@@ -36,6 +36,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
             if(old?.phase!==state.phase || old?.lesson!==(state.currentLessonKey||'')) {
                 const reservation={phase:state.phase,lesson:state.currentLessonKey||'',at:now,result:'attempting'};
                 api.GM_setValue(incidentKey,reservation);
+                try {onIncident(state.phase);}catch(_){}
                 send(config,'学院学习需要检查',`账号标识：${scope.slice(0,8)}\n${incidents[state.phase]}。\n课程：${state.currentLessonTitle||'尚未选择'}\n请查看学院页面或下载日志交给 Codex 排查。`,result=>{
                     const latest=api.GM_getValue(incidentKey,null);
                     if(latest?.at===now && latest?.phase===reservation.phase)api.GM_setValue(incidentKey,{...latest,result});
@@ -54,6 +55,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         // Reserve before sending. Unknown deliveries must not create duplicate alerts.
         const reserved={...previous,sent:true,result:'attempting',at:now};
         api.GM_setValue(ledgerKey,reserved);
+        try {onIncident('progress-stalled');}catch(_){}
         const finish=result=>{const latest=api.GM_getValue(ledgerKey,null);if(latest?.at===now && latest?.lesson===reserved.lesson)api.GM_setValue(ledgerKey,{...latest,result});};
         const detail=state.currentLessonKey?`课程：${state.currentLessonTitle||'未知'}\n服务器进度：${progress}%`:'课程：未知（尚未进入课程）';
         send(config,'学院学习进度未更新',

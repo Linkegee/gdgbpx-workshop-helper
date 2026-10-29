@@ -32,3 +32,9 @@ test('stuck navigation before a course is selected still alerts without pretendi
  h.n.tick(waiting);h.advance(10);h.n.tick(waiting);assert.equal(h.sent.length,1);
  assert.match(JSON.parse(h.sent[0].data).body,/未知/);
 });
+test('exports an automatic incident once, without exporting for manual pause',()=>{
+ const h=setup(),events=[],failed={...state,status:'paused',phase:'login-required'};
+ h.n.tick(failed,reason=>events.push(reason));h.n.tick(failed,reason=>events.push(reason));
+ assert.deepEqual(events,['login-required']);
+ const other=setup();other.n.tick({...failed,userPaused:true},reason=>events.push(reason));assert.deepEqual(events,['login-required']);
+});
