@@ -1,0 +1,38 @@
+'use strict';
+const {ipcRenderer}=require('electron');
+if(['gbpx.gd.gov.cn','wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(location.hostname) && location.protocol==='https:') {
+// Tampermonkey supplies callable timer wrappers. Native browser timers require
+// their Window receiver when the helper passes them through environment objects.
+const setTimeout=(...args)=>window.setTimeout(...args),clearTimeout=id=>window.clearTimeout(id);
+const setInterval=(...args)=>window.setInterval(...args),clearInterval=id=>window.clearInterval(id);
+const call=(op,...args)=>ipcRenderer.sendSync('helper',op,args);
+const GM_getValue=(key,fallback)=>{const r=call('get',key);return r?.found?r.value:fallback;};
+const GM_setValue=(key,value)=>call('set',key,value);
+const GM_deleteValue=key=>call('delete',key);
+const GM_getTab=callback=>queueMicrotask(()=>callback(call('tab-get')||{}));
+const GM_saveTab=value=>call('tab-set',value);
+const subscriptions=new Map();let nextSubscription=0;
+const GM_addValueChangeListener=(key,callback)=>{const id=++nextSubscription;subscriptions.set(id,{key,callback});return id;};
+const GM_removeValueChangeListener=id=>subscriptions.delete(id);
+ipcRenderer.on('helper-value',(_event,key,oldValue,value,source)=>{
+  for(const item of subscriptions.values())if(item.key===key)item.callback(key,oldValue,value,source!==call('id'));
+});
+const GM_setClipboard=text=>call('clipboard',String(text));
+const GM_addStyle=text=>{const style=document.createElement('style');style.textContent=text;(document.head||document.documentElement).append(style);return style;};
+const menus=new Map();
+const GM_registerMenuCommand=(name,fn)=>{menus.set(name,fn);call('menu',name);};
+ipcRenderer.on('helper-menu',(_event,name)=>menus.get(name)?.());
+const handles=new Map();
+const GM_openInTab=(url,options={})=>{
+  const id=call('open',url,Boolean(options.active));
+  if(!id)throw new Error('客户端拒绝了此页面；请使用学院或播放器地址');
+  const handle={closed:false,close:()=>call('close',id),onclose:null};handles.set(id,handle);return handle;
+};
+ipcRenderer.on('helper-closed',(_event,id)=>{const h=handles.get(id);if(h){h.closed=true;h.onclose?.();handles.delete(id);}});
+const GM_xmlhttpRequest=details=>{
+  let aborted=false;
+  ipcRenderer.invoke('helper-request',{url:details.url,method:details.method||'GET',timeout:details.timeout||15000,data:details.data})
+    .then(result=>{if(!aborted){if(result.error)details.onerror?.();else details.onload?.(result);}},()=>{if(!aborted)details.onerror?.();});
+  return {abort(){aborted=true;}};
+};
+// Build appends the existing userscript here, in this lexical scope.

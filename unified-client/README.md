@@ -1,0 +1,31 @@
+# 学院统一客户端 0.1.0（登录验证版）
+
+目标是一个窗口统一管理多个账号。使用 Electron 45.1.0 的持久 Session 分区，每个账号有不同的 `persist:gdgbpx-<UUID>`；由账号页面打开的播放器继承同一 Session。不是向 Edge 注入另一个标签隔离插件，也不读取现有浏览器配置。
+
+## 启动
+
+本机运行 `start.cmd`。依赖已下载。其他机器先执行 `npm ci`，如 npm 禁止安装脚本，再执行 `node node_modules/electron/install.js`。
+
+首次启动预建“账号1”和“账号2”两个分区，分别在学院页面手动登录和输入验证码，用账号备注区分。进入专题后点击现有助手“开始”。不需要再装篡改猴，内置助手为1.5.57。左侧选择账号与播放器；切换不会关闭其他账号页面。关闭页面与退出客户端需要确认。
+
+数据只放在 `%APPDATA%\GanbuUnifiedClient`：账号备注、分区登录状态、助手状态。不会导入或修改 Edge、Chrome、Firefox 的 Cookie。应用不保存账号密码；学院及 Chromium 可保存正常登录 Cookie，请保护本机账户。不要把此数据目录上传到仓库。
+
+“Bark 提醒”配置设备 key；Windows safeStorage 加密保存。若进程已有用户授权复用的 `DAZHONG_BARK_KEY`，首次启动会读取该 key。没有 key 时面板明确显示未配置，不宣称通知已送达。登录/启动异常沿用助手的 Bark 逻辑；进程退出、无响应、加载失败有本地通知及已配置的 Bark 提醒，同类异常五分钟内合并。不能在整个客户端或操作系统已崩溃后自行发送通知。未接入 Codex 自动执行与远程控制。
+
+## 已实现的保护
+
+- 远程网页不启用 Node，启用 contextIsolation、sandbox 和 webSecurity；不修改学院 CSP、证书或认证。
+- 助手运行在隔离的 preload world，不向学院网页暴露 IPC / Node。主进程按来源框架、所属账号验证请求。
+- 页面跳转与新开页限学院和两个已知播放器 HTTPS 域名。请求站外链接时不会自动放宽权限。
+- GM存储在客户端内按真实分区再次隔离，主页面及媒体框架共享所属标签的助手元数据。
+- 每个源页面最多一个受管子页面，拒绝重复打开。诊断下载保存到下载目录下“学院诊断”，不反复弹保存对话框。
+- 关闭后台定时器节流；任务运行时请求阻止应用因系统空闲挂起。仍可能耗用较多内存，不代表永不冻结或永不掉线。
+- 进程无响应/退出时保留账号卡片和错误提示；不盲目重开、重登或伪造学时。重新启动仅恢复账号入口，不恢复旧播放器授权地址。
+
+## 验证和边界
+
+`npm test` 验证分区规则、域名限制和状态摘要。`npm run build` 后，用 Electron 运行 `electron . --self-test`：使用临时数据目录与拦截的合成 HTTPS 页面，不访问真实学院、不加载真实账号。该测试验证真实 Chromium Cookie/localStorage 分离、助手预加载、不同助手 scope、远程页没有 Node/面板桥、子页继承分区、拒绝重复子页及刷新保持存储。
+
+**尚未验证：真实学院双账号登录、验证码、原生跨域播放器、服务器记学时、整课结束切换，以及8账号长时间运行。** 不能将合成测试通过解释为这些业务已通过。未安装签名的独立exe、自动更新客户端、系统外部看门狗；当前通过本目录的启动脚本运行。已有 Edge 播放不会被迁移或关闭。
+
+依据：[Electron Session持久分区](https://www.electronjs.org/docs/latest/api/session)、[安全要求](https://www.electronjs.org/docs/latest/tutorial/security)、[WebContentsView](https://www.electronjs.org/docs/latest/api/web-contents-view)。
