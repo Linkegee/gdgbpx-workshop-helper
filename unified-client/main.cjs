@@ -9,6 +9,7 @@ const {report}=require('./diagnostics.cjs');
 const {createStoreWriter}=require('./store-writer.cjs');
 const {createBatch}=require('./batch.cjs');
 const {present}=require('./presentation.cjs');
+const {surfaceStats,createVisualWatch}=require('./visual-watch.cjs');
 const HOME='https://gbpx.gd.gov.cn/gdceportal/index.aspx';
 const SELF=path.join(__dirname,'shell.html');
 const selfTest=process.argv.includes('--self-test');
@@ -29,12 +30,26 @@ const pages=new Map(),stores=new Map(),configured=new Set(),alerts=new Map();
 function read(name,fallback){const file=path.join(app.getPath('userData'),name);return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,'')):fallback;}
 function write(name,value){const file=path.join(app.getPath('userData'),name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);}
 const storeWriter=createStoreWriter({setTimeout,clearTimeout,write:id=>write('helper-'+id+'.json',stores.get(id)),onError:()=>notify('storage','本地状态保存失败，请检查磁盘空间。')});
+const visualWatch=createVisualWatch({context:id=>{
+ const p=pages.get(id);if(!p||p.view.webContents.isDestroyed())return null;
+ const root=p.parent?pages.get(p.parent):p,scope=root?.metadata.gdgbpxScopeV2?.id;
+ const values=store(p.accountId),task=values['gdgbpx_account_v1:'+scope+':gdgbpx_workshop_helper_state_v1'];
+ const bounds=p.view.getBounds(),selected=active===id;
+ return {accountId:p.accountId,kind:p.parent?'player':'main',eligible:task?.status==='running'&&!task.maintenance,manualHold:Boolean(values.__clientManualHold||task?.userPaused||read('rescue-config.json',{enabled:true}).enabled===false),ready:!p.view.webContents.isLoadingMainFrame()&&Date.now()-(p.loadedAt||p.createdAt)>=15000,
+  selected,layerOk:!selected||(p.view.getVisible()&&win.contentView.children.at(-1)===p.view&&bounds.width>0&&bounds.height>0)};
+},capture:async id=>{
+ const p=pages.get(id);if(!p)throw Error('page-closed');let timer;
+ try{const image=await Promise.race([p.view.webContents.capturePage(undefined,{stayHidden:active!==id,stayAwake:false}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('capture-timeout')),3000);})]);
+  if(image.isEmpty())return{available:false,white:false};const small=image.resize({width:96,height:72}),size=small.getSize();return surfaceStats(small.toBitmap(),size.width,size.height);
+ }finally{clearTimeout(timer);}
+},repair:async id=>{const p=pages.get(id);if(!p)throw Error('page-closed');if(active===id){p.view.setVisible(false);present({win,pages,active});}else{const {width,height}=win.getContentBounds();p.view.setBounds({x:300,y:68,width:Math.max(1,width-300),height:Math.max(1,height-68)});}},changed:(id,health)=>{const p=pages.get(id);if(p){p.visualHealth=health;update();}}});
+let selectedVisualTimer=null;
 function store(id){if(!stores.has(id))stores.set(id,read('helper-'+id+'.json',{}));return stores.get(id);}
 function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;alerts.set(key,Date.now());if(Notification.isSupported())new Notification({title:'学院统一客户端',body:message}).show();if(barkConfig&&!selfTest)session.defaultSession.fetch('https://api.day.app/push',{method:'POST',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_key:barkConfig.key,title:'学院客户端需要检查',body:message,group:'干部学院'}),signal:AbortSignal.timeout(15000)}).catch(()=>{});}
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
-function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
+function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',visualHealth:p.visualHealth,kind:p.parent?'播放器':'专题 / 首页'}))})),active,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
-function layout(){if(!win||win.isDestroyed())return;present({win,pages,active});update();}
+function layout(){if(!win||win.isDestroyed())return;present({win,pages,active});update();if(!selfTest){clearTimeout(selectedVisualTimer);selectedVisualTimer=setTimeout(()=>visualWatch.scan(active).catch(()=>{}),400);}}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
 function configure(id){
   const ses=session.fromPartition(partition(id));if(configured.has(id))return ses;configured.add(id);
@@ -50,7 +65,7 @@ function open(accountId,url=HOME,parent=null,focus=true){
   // silently closing an existing video or creating an unbounded tab storm.
   if(parent&&[...pages.values()].some(p=>p.parent===parent&&!p.view.webContents.isDestroyed()))return null;
   const view=new WebContentsView({webPreferences:{session:configure(accountId),sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false,webSecurity:true}});
-  const wc=view.webContents,p={view,accountId,parent,metadata:{},menus:new Set(),title:'正在加载',issue:''};pages.set(wc.id,p);win.contentView.addChildView(view);
+  const wc=view.webContents,p={view,accountId,parent,metadata:{},menus:new Set(),title:'正在加载',issue:'',createdAt:Date.now(),loadedAt:0};pages.set(wc.id,p);win.contentView.addChildView(view);
   const sourceScope=pages.get(parent)?.metadata.gdgbpxScopeV2?.id;
   wc.setAudioMuted(store(accountId)['gdgbpx_account_v1:'+sourceScope+':gdgbpx_workshop_helper_state_v1']?.settings?.muted!==false);
   if(selfTest)wc.on('preload-error',(_event,_file,error)=>console.error('TEST preload:',error));
@@ -58,12 +73,13 @@ function open(accountId,url=HOME,parent=null,focus=true){
   wc.on('will-navigate',(event,target)=>{if(!allowedPage(target)){event.preventDefault();p.issue='已阻止跳转至学院之外的地址';update();}});
   wc.on('will-redirect',(event,target)=>{if(!allowedPage(target))event.preventDefault();});
   wc.on('page-title-updated',(_event,title)=>{p.title=title;update();});
-  wc.on('did-finish-load',()=>{p.issue='';update();if(!p.parent&&resumeOnLoad.has(accountId)&&new URL(wc.getURL()).pathname==='/gdceportal/index.aspx'){resumeOnLoad.delete(accountId);wc.send('client-control',{id:'startup-'+randomUUID(),action:'start'});}});
+  wc.on('did-start-navigation',(_event,_url,_inPlace,isMainFrame)=>{if(isMainFrame){p.loadedAt=Date.now();p.visualHealth=null;visualWatch.remove(wc.id);}});
+  wc.on('did-finish-load',()=>{p.loadedAt=Date.now();p.issue='';update();if(!p.parent&&resumeOnLoad.has(accountId)&&new URL(wc.getURL()).pathname==='/gdceportal/index.aspx'){resumeOnLoad.delete(accountId);wc.send('client-control',{id:'startup-'+randomUUID(),action:'start'});}});
   wc.on('did-fail-load',(_e,code,_description,_url,isMainFrame)=>{if(isMainFrame&&code!==-3){p.issue='页面加载失败，请查看该账号后重试';notify(accountId,p.issue);update();}});
   wc.on('render-process-gone',()=>{p.issue='页面进程已退出；请点击重新加载。不会自动新开播放器。';notify(accountId,p.issue);update();});
   wc.on('unresponsive',()=>{p.issue='页面暂时无响应';notify(accountId,p.issue);update();});
   wc.on('responsive',()=>{p.issue='';update();});
-  wc.on('destroyed',()=>{pages.delete(wc.id);for(const other of pages.values())other.view.webContents.send('helper-closed',wc.id);if(active===wc.id)active=[...pages.keys()][0]||'';if(!closing)layout();});
+  wc.on('destroyed',()=>{visualWatch.remove(wc.id);pages.delete(wc.id);for(const other of pages.values())other.view.webContents.send('helper-closed',wc.id);if(active===wc.id)active=[...pages.keys()][0]||'';if(!closing)layout();});
   if(focus||!active||(parent&&active===parent))active=wc.id;layout();wc.loadURL(url).catch(()=>{});return wc.id;
 }
 function sender(event){const p=pages.get(event.sender.id);if(!p||!allowedPage(event.senderFrame?.url||''))throw new Error('Invalid sender');return p;}
@@ -228,7 +244,8 @@ app.whenReady().then(async()=>{
   // Restore account entry points only. Never resurrect expired player URLs.
   for(const a of accounts)open(a.id);
   if(!selfTest)setInterval(()=>{try{processControl();}catch{notify('control','本机恢复通道出现错误，请检查客户端。');}},2000).unref();
-  if(selfTest){closing=true;await require('./tests/engine-selftest.cjs')({accounts,configure,open,pages,store,win,app,processControl});}
+  if(!selfTest){let cursor=0;setInterval(()=>{const list=[...pages.keys()];if(list.length)visualWatch.scan(list[cursor++%list.length]).catch(()=>{});},4000).unref();setInterval(()=>visualWatch.scan(active).catch(()=>{}),10000).unref();}
+  if(selfTest){closing=true;await require('./tests/engine-selftest.cjs')({accounts,configure,open,pages,store,win,app,processControl,visualWatch});}
 }).catch(error=>{dialog.showErrorBox('客户端启动失败',error.message);app.quit();});
 app.on('window-all-closed',()=>app.quit());
-app.on('will-quit',()=>{if(!selfTest)write('client-owner.json',{pid:process.pid,running:false,at:Date.now()});worker?.kill();clearTimeout(diagnosticsTimer);storeWriter.dispose();});
+app.on('will-quit',()=>{if(!selfTest)write('client-owner.json',{pid:process.pid,running:false,at:Date.now()});worker?.kill();clearTimeout(selectedVisualTimer);clearTimeout(diagnosticsTimer);storeWriter.dispose();});

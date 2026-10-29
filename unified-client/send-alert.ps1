@@ -1,4 +1,4 @@
-param([ValidateSet('Offline','Login','Failed','Complete','Setup')][string]$Reason='Failed',[string]$Account='',[ValidateSet('Ended','Playback','Native','Stale','Unknown')][string]$Cause='Unknown')
+param([ValidateSet('Offline','Login','Failed','Complete','Setup')][string]$Reason='Failed',[string]$Account='',[ValidateSet('Visual','Ended','Playback','Native','Stale','Unknown')][string]$Cause='Unknown')
 $ErrorActionPreference='Stop'
 $deviceKey=$env:DAZHONG_BARK_KEY
 if(-not $deviceKey){$deviceKey=[Environment]::GetEnvironmentVariable('DAZHONG_BARK_KEY','User')}

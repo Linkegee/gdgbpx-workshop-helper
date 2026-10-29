@@ -7,6 +7,8 @@ function evaluate(targets,diagnostics,previous={},now=Date.now()){
  for(const [index,target]of (targets.accounts||[]).entries()){
   const account=diagnostics?.accounts?.find(a=>a.id===target.id),state=selectState(account);
   const topic=account?.learning?.workshops?.[target.classId];
+  const visualFailures=(account?.tabs||[]).filter(t=>t.visualHealth?.phase==='needs-help'&&now-t.visualHealth.at<180000);
+  const visualFailure=visualFailures.find(t=>t.kind==='player')||visualFailures[0];
   const before=previous.samples?.[target.id],media=state?.media,lesson=media?.lessonKey||state?.lesson;
   const changed=before?.lesson!==lesson,advancing=(Number.isFinite(media?.currentTime)&&Number.isFinite(before?.time)&&media.currentTime>before.time+0.1)||(Number.isFinite(state?.progress)&&Number.isFinite(before?.progress)&&state.progress>before.progress);
   const ended=Number.isFinite(media?.duration)&&media.duration>0&&media.currentTime>=media.duration-1&&media.paused===true;
@@ -18,6 +20,7 @@ function evaluate(targets,diagnostics,previous={},now=Date.now()){
   else if(account.manualHold||!state||state.userPaused||['idle','stopped','complete'].includes(state.status))status='manual-hold-or-unverified-completion';
   else if(state.maintenance)status='maintenance';
   else if(ended){status=now-sample.endedSince<120000?'awaiting-server':'needs-user';reason='ended-without-server-completion';}
+  else if(visualFailure){reason='visual-repaint-unverified:'+visualFailure.kind;if(now-sample.lastAdvance>=300000){status='recoverable';action=visualFailure.kind==='player'?'reload-player':'reload-main';}else status='needs-user';}
   else if(state.status==='paused'){
    if(['player-open-failed','player-stalled','completed-close-failed','completion-unverified'].includes(state.phase)){status='recoverable';action='retry';}else status='needs-user';
   }else if(account.tabs?.some(t=>t.issue)){status='recoverable';action=account.tabs.some(t=>t.issue&&t.kind==='player')?'reload-player':'reload-main';}

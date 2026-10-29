@@ -2,7 +2,7 @@
 // Synthetic pages only: HTTPS is intercepted inside throwaway test sessions.
 // No user browser, credentials, profile or academy server is accessed.
 const assert=require('node:assert/strict');const {account}=require('../policy.cjs');const {spawn}=require('node:child_process');const fs=require('node:fs'),path=require('node:path');
-module.exports=async({accounts,configure,open,pages,store,win,app,processControl})=>{
+module.exports=async({accounts,configure,open,pages,store,win,app,processControl,visualWatch})=>{
   try{
     const secondary=await new Promise((resolve,reject)=>{
       const child=spawn(process.execPath,[app.getAppPath(),'--self-test','--self-test-root='+app.getPath('userData')],{windowsHide:true});let output='';
@@ -47,9 +47,10 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     panel.reload();await until(async()=>await panel.executeJavaScript(`Boolean(document.querySelector('[data-account-id="${a.id}"] .account-details'))`));
     assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-details').hidden`),false);
     assert.equal(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'panel.json'),'utf8'))[a.id],false);
-    await panel.executeJavaScript('document.getElementById("collapse-all").click()');
+    await panel.executeJavaScript('document.getElementById("toggle-all").click()');
     await until(async()=>await panel.executeJavaScript('Array.from(document.querySelectorAll(".account-details")).every(n=>n.hidden)'));
-    await panel.executeJavaScript('document.getElementById("expand-all").click()');
+    assert.equal(await panel.executeJavaScript('document.getElementById("toggle-all").textContent'),'全部展开');
+    await panel.executeJavaScript('document.getElementById("toggle-all").click()');
     await until(async()=>await panel.executeJavaScript('Array.from(document.querySelectorAll(".account-details")).every(n=>!n.hidden)'));
     await panel.executeJavaScript(`document.querySelector('[data-account-id="${b.id}"] .disclosure').click()`);
     // Reproduce the real failure: Vue puts course authorization on a page-world
@@ -118,6 +119,16 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     assert.ok(fs.statSync(path.join(app.getPath('userData'),captured.result.slice('captured-local:'.length))).size>100);
     const pixels=require('electron').nativeImage.createFromPath(path.join(app.getPath('userData'),captured.result.slice('captured-local:'.length))).toBitmap();
     assert.deepEqual([...pixels.subarray(0,3)],[85,51,17],'capture must contain the selected fixture surface, not a white bitmap');
+    // Reproduce a visible-slot white screen: the selected native view is
+    // unexpectedly hidden while its renderer/media continue running.
+    const selectedPage=pages.get(player),siblingVisible=pages.get([...pages.entries()].find(([,p])=>p.view.webContents===otherPlayer)[0]).view.getVisible();
+    selectedPage.loadedAt=Date.now()-20000;selectedPage.view.setVisible(false);
+    assert.equal(selectedPage.view.getVisible(),false);
+    await visualWatch.scan(player);
+    assert.equal(visualWatch.get(player).phase,'recovered','automatic scan must repair the hidden selected view');
+    assert.equal(selectedPage.view.getVisible(),true);assert.equal(win.contentView.children.at(-1),selectedPage.view);
+    assert.equal(pw.getURL(),locationBefore,'automatic white-screen repair must not reload a healthy player');
+    assert.equal(otherPlayer.isDestroyed(),false);assert.equal([...pages.values()].find(p=>p.view.webContents===otherPlayer).view.getVisible(),siblingVisible,'repair must preserve the background account visibility');
     await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
     await until(()=>pw.isAudioMuted());
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);

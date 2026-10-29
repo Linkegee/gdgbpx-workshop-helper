@@ -11,8 +11,8 @@ let rescueEnabled=true;
 const rescueToggle=element('button','','关闭异常接管');rescueToggle.type='button';rescueToggle.onclick=()=>window.client.command('rescue-enabled',!rescueEnabled);group.append(rescueToggle);
 const resultLabels={'dispatched-needs-verification':'已下发，等待状态核验','already-running':'已在运行','already-stopped':'已停止','already-paused':'已暂停','already-complete':'专题已完成','login-required':'需重新登录','helper-unavailable':'助手未就绪','delivery-unknown':'未收到回执，请检查','account-unavailable':'页面未打开','dispatch-failed':'发送失败','cancelled-by-new-command':'已由新命令取消'};
 document.getElementById('add').onclick=()=>window.client.command('add');
-document.getElementById('collapse-all').onclick=()=>window.client.command('collapse-all',true);
-document.getElementById('expand-all').onclick=()=>window.client.command('collapse-all',false);
+let collapseAllNext=false;
+document.getElementById('toggle-all').onclick=()=>window.client.command('collapse-all',collapseAllNext);
 document.getElementById('reminders').onclick=()=>document.getElementById('bark').showModal();
 document.getElementById('bark-cancel').onclick=()=>document.getElementById('bark').close();
 document.getElementById('bark-disable').onclick=async()=>{await window.client.command('bark',null);document.getElementById('bark').close();};
@@ -38,7 +38,8 @@ function updateCard(card,a,state){
  card.title.textContent=a.name;card.title.title=a.name;
  card.details.hidden=a.collapsed;card.toggle.textContent=a.collapsed?'展开 ▾':'收纳 ▴';card.toggle.setAttribute('aria-expanded',String(!a.collapsed));card.toggle.setAttribute('aria-label',(a.collapsed?'展开':'收纳')+a.name+'详细信息');
  const current=a.states.filter(s=>s.status==='running').sort((a,b)=>(b.media?.at||0)-(a.media?.at||0))[0]||a.states[0];
- const problem=a.tabs.find(t=>t.issue)?.issue||a.states.find(s=>['account-context-changed','login-required','player-open-failed','completed-close-failed','identity-entry-failed','player-lesson-mismatch'].includes(s.phase))?.message||'';
+ const visualFailure=a.tabs.find(t=>t.visualHealth?.phase==='needs-help');
+ const problem=a.tabs.find(t=>t.issue)?.issue||(visualFailure?'画面自动重绘未恢复，已交给异常接管':null)||a.states.find(s=>['account-context-changed','login-required','player-open-failed','completed-close-failed','identity-entry-failed','player-lesson-mismatch'].includes(s.phase))?.message||'';
  const ended=current?.media?.duration>0&&current.media.currentTime>=current.media.duration-1&&current.media.paused===true;
  const mediaLabel=ended?'结束待核验':current?.media?.at&&Date.now()-current.media.at>120000?'心跳过期':current?.media?.paused===true?'媒体暂停':'运行中';
  const label=problem?'需处理':current?.status==='running'?mediaLabel:({paused:'已暂停',stopped:'已停止',complete:'已完成'}[current?.status]||'未启动');
@@ -61,6 +62,8 @@ function updateCard(card,a,state){
  if(signature!==card.tabSignature){card.tabSignature=signature;card.tabs.replaceChildren();for(const t of a.tabs){const row=element('div','page-row');row.append(button(t.kind+' · '+t.title,'show',t.id,'tab'+(t.id===state.active?' active':'')));const controls=element('div','page-actions');controls.append(button('重新加载','reload',t.id),button('助手菜单','menu',t.id),button('关闭','close',t.id,'danger'));row.append(controls);card.tabs.append(row);}}
 }
 window.client.onState(state=>{
+ collapseAllNext=state.accounts.some(a=>!a.collapsed);
+ const toggleAll=document.getElementById('toggle-all');toggleAll.textContent=collapseAllNext?'全部收纳':'全部展开';toggleAll.setAttribute('aria-expanded',String(collapseAllNext));toggleAll.disabled=!state.accounts.length;
  const batch=state.batch;
  groupStatus.textContent=batch?({start:'开始 / 继续',pause:'暂停',stop:'停止'}[batch.action])+'：'+batch.results.length+'/'+batch.total+' 已返回'+(batch.running?' · 发送中':' · 已结束，请核对账号状态'): '开始会错峰发送；停止会取消待发送的开始命令。';
  const rescue=state.rescue;
