@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.54
+// @version      1.5.55
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -462,7 +462,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.54";
+    const VERSION = "1.5.55";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -545,6 +545,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
     let lastVisibleProbeSyncSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
+    let fallbackPlayerLessonKey = '';
     let managedPlayerCloseRequestedAt = 0;
     let bridgeFlushTimer = null;
     let bridgeSending = false;
@@ -2692,6 +2693,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 
     function trackManagedPlayerTab(tab) {
         fallbackPlayerTab = tab || null;
+        fallbackPlayerLessonKey = tab ? getState().currentLessonKey : '';
         if (!tab) return;
         const ownedLesson = getState().currentLessonKey;
         tab.onclose = () => {
@@ -2989,8 +2991,12 @@ function createProgressNotifier(api, scope, clock = Date.now) {
             }
             if (state.phase === 'opening-video' && age > PLAYER_OPEN_START_TIMEOUT_MS) {
                 const heartbeat = getPlayerHeartbeat();
-                if (heartbeat?.lessonKey === state.currentLessonKey
-                    && Date.now() - Number(heartbeat.at || 0) < 15000 && age < 300000) {
+                const ownedTabLoading = fallbackPlayerTab && fallbackPlayerTab.closed !== true
+                    && fallbackPlayerLessonKey === state.currentLessonKey;
+                const freshLoadingHeartbeat = heartbeat?.lessonKey === state.currentLessonKey
+                    && Date.now() - Number(heartbeat.at || 0) >= 0
+                    && Date.now() - Number(heartbeat.at || 0) < 15000;
+                if ((ownedTabLoading || freshLoadingHeartbeat) && age < 300000) {
                     // Background media loading can be delayed well beyond 45 seconds.
                     // Keep the same player, with a bounded five-minute loading window.
                     return;
@@ -3677,6 +3683,9 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         const video = playerVideo;
         if (!video || state.status !== 'running' || state.maintenance || playerClosePending
             || !accountRuntime.guard() || !playerLessonKey || playerLessonKey !== state.currentLessonKey) return false;
+        // Blob media is owned by the site's player. Native load() can detach its media pipeline.
+        // Leave it intact and let the caller report the stall and attempt ordinary play().
+        if (String(video.currentSrc || video.src || '').startsWith('blob:')) return false;
         if (mediaRecoveryAttempts >= 2) {
             updateState({status:'paused',phase:'player-stalled',message:'当前视频两次重新加载后仍无进度，已暂停；请检查网络和播放器后点继续'});
             video.pause();
@@ -4129,7 +4138,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.54",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.55",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

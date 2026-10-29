@@ -84,6 +84,7 @@
     let lastVisibleProbeSyncSnapshot = '';
     let bridgeQueue = [];
     let fallbackPlayerTab = null;
+    let fallbackPlayerLessonKey = '';
     let managedPlayerCloseRequestedAt = 0;
     let bridgeFlushTimer = null;
     let bridgeSending = false;
@@ -2231,6 +2232,7 @@
 
     function trackManagedPlayerTab(tab) {
         fallbackPlayerTab = tab || null;
+        fallbackPlayerLessonKey = tab ? getState().currentLessonKey : '';
         if (!tab) return;
         const ownedLesson = getState().currentLessonKey;
         tab.onclose = () => {
@@ -2528,8 +2530,12 @@
             }
             if (state.phase === 'opening-video' && age > PLAYER_OPEN_START_TIMEOUT_MS) {
                 const heartbeat = getPlayerHeartbeat();
-                if (heartbeat?.lessonKey === state.currentLessonKey
-                    && Date.now() - Number(heartbeat.at || 0) < 15000 && age < 300000) {
+                const ownedTabLoading = fallbackPlayerTab && fallbackPlayerTab.closed !== true
+                    && fallbackPlayerLessonKey === state.currentLessonKey;
+                const freshLoadingHeartbeat = heartbeat?.lessonKey === state.currentLessonKey
+                    && Date.now() - Number(heartbeat.at || 0) >= 0
+                    && Date.now() - Number(heartbeat.at || 0) < 15000;
+                if ((ownedTabLoading || freshLoadingHeartbeat) && age < 300000) {
                     // Background media loading can be delayed well beyond 45 seconds.
                     // Keep the same player, with a bounded five-minute loading window.
                     return;
@@ -3216,6 +3222,9 @@
         const video = playerVideo;
         if (!video || state.status !== 'running' || state.maintenance || playerClosePending
             || !accountRuntime.guard() || !playerLessonKey || playerLessonKey !== state.currentLessonKey) return false;
+        // Blob media is owned by the site's player. Native load() can detach its media pipeline.
+        // Leave it intact and let the caller report the stall and attempt ordinary play().
+        if (String(video.currentSrc || video.src || '').startsWith('blob:')) return false;
         if (mediaRecoveryAttempts >= 2) {
             updateState({status:'paused',phase:'player-stalled',message:'当前视频两次重新加载后仍无进度，已暂停；请检查网络和播放器后点继续'});
             video.pause();

@@ -81,6 +81,35 @@ function boot(saved, values = new Map()) {
 const active = { status: 'running', phase: 'watching-video', currentClassId: 'class-1',
     currentLessonTitle: '测试课程', currentLessonKey: 'class-1::测试课程', currentLessonProgress: 83.13 };
 
+test('verification navigation heartbeat gap must not pause an owned loading player',()=>{
+ const h=boot({...active,phase:'opening-video',fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+ readyDetail(h);h.api.trackManagedPlayerTab({closed:false,close(){}});
+ h.values.set(HEARTBEAT,{lessonKey:active.currentLessonKey,sessionId:'loading',at:h.now()});
+ h.advance(45158);h.api.handleDetailPage(h.api.getState());
+ assert.equal(h.api.getState().status,'running');
+ h.advance(80000);h.api.handleDetailPage(h.api.getState());
+ assert.equal(h.api.getState().status,'running');assert.equal(h.opened.length,0);
+ h.advance(180000);h.api.handleDetailPage(h.api.getState());
+ assert.equal(h.api.getState().phase,'player-open-failed');
+});
+
+test('blob player recovery preserves site media pipeline and playback position',()=>{
+ const h=boot(active),video=retryVideo(h);video.currentSrc='blob:https://player.example/media';
+ for(let i=0;i<3;i++)h.api.recoverStalledMedia();
+ assert.equal(video.loads,0);assert.equal(video.currentTime,42);
+ assert.equal(h.api.getState().status,'running');assert.equal(h.opened.length,0);
+});
+
+test('closed or other-lesson managed handles cannot extend player startup',()=>{
+ for(const otherLesson of [false,true]) {
+  const h=boot({...active,phase:'opening-video',fallbackOpenAttempted:true,lastActionAt:1_800_000_000_000});
+  readyDetail(h);h.api.trackManagedPlayerTab({closed:!otherLesson,close(){}});
+  if(otherLesson)h.values.set(STATE,{...h.api.getState(),currentLessonKey:'class-1::other'});
+  h.advance(52000);h.api.handleDetailPage(h.api.getState());
+  assert.equal(h.api.getState().phase,'player-open-failed');assert.equal(h.opened.length,0);
+ }
+});
+
 test('unverified course ownership cannot apply visible progress or open another player',()=>{
     const h=boot(active);readyDetail(h,[{title:'测试课程',progress:100,status:'已完成'}]);
     h.context.accountRuntime={...h.context.accountRuntime,checkCourseAuth:()=>false};
