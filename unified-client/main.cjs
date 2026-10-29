@@ -12,7 +12,7 @@ if(selfTest)app.setPath('userData',process.argv.find(a=>a.startsWith('--self-tes
 const primary=app.requestSingleInstanceLock();
 if(!primary){console.log('SECONDARY_BLOCKED');app.quit();}
 app.on('second-instance',()=>{if(win&&!win.isDestroyed()){if(win.isMinimized())win.restore();win.show();win.focus();}});
-let win,accounts=[],active='',diagnosticsTimer,blocker=null,closing=false,barkConfig=null;
+let win,accounts=[],active='',diagnosticsTimer,blocker=null,closing=false,barkConfig=null,panelPreferences={};
 const pages=new Map(),stores=new Map(),configured=new Set(),alerts=new Map();
 function read(name,fallback){const file=path.join(app.getPath('userData'),name);return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):fallback;}
 function write(name,value){const file=path.join(app.getPath('userData'),name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);}
@@ -20,7 +20,7 @@ const storeWriter=createStoreWriter({setTimeout,clearTimeout,write:id=>write('he
 function store(id){if(!stores.has(id))stores.set(id,read('helper-'+id+'.json',{}));return stores.get(id);}
 function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;alerts.set(key,Date.now());if(Notification.isSupported())new Notification({title:'学院统一客户端',body:message}).show();if(barkConfig&&!selfTest)session.defaultSession.fetch('https://api.day.app/push',{method:'POST',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_key:barkConfig.key,title:'学院客户端需要检查',body:message,group:'干部学院'}),signal:AbortSignal.timeout(15000)}).catch(()=>{});}
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
-function snapshot(){return {accounts:accounts.map(a=>({...a,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,barkEnabled:Boolean(barkConfig)};}
+function snapshot(){return {accounts:accounts.map(a=>({...a,collapsed:panelPreferences[a.id]!==false,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
 function layout(){if(!win||win.isDestroyed())return;const {width,height}=win.getContentBounds();for(const p of pages.values()){const show=p.view.webContents.id===active;p.view.setBounds({x:300,y:68,width:Math.max(1,width-300),height:Math.max(1,height-68)});p.view.setVisible(show);}update();}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
@@ -94,6 +94,8 @@ function trustedPanel(event){return event.sender===win.webContents&&event.sender
 ipcMain.handle('panel-command',async(event,op,id)=>{
   if(!trustedPanel(event))return;
   if(op==='state'){update();return;}
+  if(op==='collapse'&&accounts.some(a=>a.id===id?.accountId)&&typeof id.collapsed==='boolean'){panelPreferences[id.accountId]=id.collapsed;write('panel.json',panelPreferences);update();return;}
+  if(op==='collapse-all'&&typeof id==='boolean'){for(const a of accounts)panelPreferences[a.id]=id;write('panel.json',panelPreferences);update();return;}
   if(op==='bark'){
     if(!id?.key){barkConfig=null;write('bark.json',null);update();return;}
     if(!/^[A-Za-z0-9_-]{8,200}$/.test(id.key)||!safeStorage.isEncryptionAvailable())throw new Error('提醒配置无效，或系统加密不可用');
@@ -112,6 +114,8 @@ ipcMain.handle('panel-command',async(event,op,id)=>{
 });
 app.whenReady().then(async()=>{
   if(!primary)return;
+  const savedPanel=read('panel.json',{});
+  panelPreferences=Object.fromEntries(Object.entries(savedPanel&&typeof savedPanel==='object'?savedPanel:{}).filter(([id,value])=>/^[a-f0-9-]{36}$/.test(id)&&typeof value==='boolean'));
   accounts=read('accounts.json',[]);if(!Array.isArray(accounts))throw new Error('账号配置格式错误');for(const a of accounts)partition(a.id);
   if(!selfTest&&!accounts.length){accounts=[account('账号 1'),account('账号 2')];write('accounts.json',accounts);}
   const savedBark=read('bark.json',null);

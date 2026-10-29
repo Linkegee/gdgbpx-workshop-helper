@@ -1,7 +1,7 @@
 'use strict';
 // Synthetic pages only: HTTPS is intercepted inside throwaway test sessions.
 // No user browser, credentials, profile or academy server is accessed.
-const assert=require('node:assert/strict');const {account}=require('../policy.cjs');const {spawn}=require('node:child_process');
+const assert=require('node:assert/strict');const {account}=require('../policy.cjs');const {spawn}=require('node:child_process');const fs=require('node:fs'),path=require('node:path');
 module.exports=async({accounts,configure,open,pages,store,win,app})=>{
   try{
     const secondary=await new Promise((resolve,reject)=>{
@@ -34,6 +34,24 @@ module.exports=async({accounts,configure,open,pages,store,win,app})=>{
     assert.ok(ascope);assert.ok(bscope);assert.notEqual(ascope.id,bscope.id);
     assert.ok(Object.keys(store(a.id)).some(k=>k.includes(ascope.id)));
     assert.ok(!JSON.stringify(store(b.id)).includes(ascope.id));
+    const panel=win.webContents;
+    panel.setBackgroundThrottling(false);
+    await until(async()=>await panel.executeJavaScript('document.querySelectorAll(".account").length===2'));
+    assert.equal(await panel.executeJavaScript('Array.from(document.querySelectorAll(".account-details")).every(n=>n.hidden)'),true);
+    await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .disclosure').click()`);
+    await until(async()=>await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-details').hidden===false`));
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${b.id}"] .account-details').hidden`),true);
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .disclosure').getAttribute('aria-expanded')`),'true');
+    await panel.executeJavaScript(`(()=>{const input=document.querySelector('[data-account-id="${a.id}"] .account-rename');input.focus();input.value='draft';window.client.command('state');})()`);
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-rename').value`),'draft');
+    panel.reload();await until(async()=>await panel.executeJavaScript(`Boolean(document.querySelector('[data-account-id="${a.id}"] .account-details'))`));
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-details').hidden`),false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'panel.json'),'utf8'))[a.id],false);
+    await panel.executeJavaScript('document.getElementById("collapse-all").click()');
+    await until(async()=>await panel.executeJavaScript('Array.from(document.querySelectorAll(".account-details")).every(n=>n.hidden)'));
+    await panel.executeJavaScript('document.getElementById("expand-all").click()');
+    await until(async()=>await panel.executeJavaScript('Array.from(document.querySelectorAll(".account-details")).every(n=>!n.hidden)'));
+    await panel.executeJavaScript(`document.querySelector('[data-account-id="${b.id}"] .disclosure').click()`);
     // Reproduce the real failure: Vue puts course authorization on a page-world
     // DOM expando; an isolated preload cannot see that __vue__ property.
     for(const [wc,item] of [[aw,a],[bw,b]]){
@@ -66,6 +84,20 @@ module.exports=async({accounts,configure,open,pages,store,win,app})=>{
     assert.equal(await frame.executeJavaScript('typeof window.require'),'undefined');
     assert.ok(pages.get(player).view.getBounds().width>0,'background player must have a real viewport');
     assert.equal(pw.isAudioMuted(),true,'player must be muted before media preload is ready');
+    await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .disclosure').click()`);
+    await until(async()=>await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-details').hidden`));
+    assert.equal(pw.isDestroyed(),false,'folding account details must never close a player');
+    assert.equal(pw.isAudioMuted(),true,'folding account details must not alter audio');
+    await panel.executeJavaScript('new Promise(resolve=>{requestAnimationFrame(()=>requestAnimationFrame(resolve));setTimeout(resolve,500);})');
+    const preview=await win.capturePage({x:0,y:68,width:300,height:480});fs.writeFileSync(path.join(__dirname,'..','test-data','panel-preview.png'),preview.toPNG());
+    const stateKey='gdgbpx_account_v1:'+ascope.id+':gdgbpx_workshop_helper_state_v1',savedState=structuredClone(store(a.id)[stateKey]);
+    store(a.id)[stateKey]={...savedState,status:'paused',phase:'login-required',message:'Synthetic login expired'};
+    await panel.executeJavaScript('window.client.command("state")');
+    await until(async()=>await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .badge').textContent==='需处理'`));
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .issue').hidden`),false,'errors must stay visible even while details are folded');
+    assert.equal(await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .account-details').hidden`),true);
+    store(a.id)[stateKey]=savedState;await panel.executeJavaScript('window.client.command("state")');
+    await panel.executeJavaScript(`document.querySelector('[data-account-id="${a.id}"] .disclosure').click()`);
     await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
     await until(()=>!pw.isAudioMuted());
     const otherPlayer=[...pages.values()].find(p=>p.parent===bid).view.webContents;
@@ -80,7 +112,7 @@ module.exports=async({accounts,configure,open,pages,store,win,app})=>{
     assert.equal(otherPlayer.isDestroyed(),false,'closing account A player must preserve account B player');
     assert.ok(!Object.values(store(a.id)).some(v=>Array.isArray(v)&&v.some(log=>log.event==='script-update-check-failed')),'embedded helper must not run a Tampermonkey-only update path');
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: single-instance lock; isolated cookies/storage/scopes; sandbox; Vue authorization; managed launch; nested media heartbeat/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
+    console.log('ENGINE PASS: per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };
