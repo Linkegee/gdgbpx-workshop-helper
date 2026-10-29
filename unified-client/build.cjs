@@ -15,6 +15,12 @@ helper=helper.replace(playerMarker,playerMarker+`\n        const context=clientR
         return {url:clientUrl.href,resourceCode:context.resourceCode,databaseCourseId:context.databaseCourseId,playDomain:clientUrl.origin+clientUrl.pathname};\n`);
 const reader=fs.readFileSync(path.join(base,'course-context.cjs'),'utf8').replace('module.exports={readCourseContextInPage};','');
 const media=fs.readFileSync(path.join(base,'media-context.cjs'),'utf8').replace('module.exports={findClientVideo,clientPlayerDocument};','');
+for(const marker of ['function getAvailableUpdate() {','function checkForScriptUpdate(force = false) {'])if(helper.split(marker).length!==2)throw new Error('Client version adapter seam changed');
+helper=helper.replace('function getAvailableUpdate() {','function getAvailableUpdate() {\n        return null;\n');
+helper=helper.replace('function checkForScriptUpdate(force = false) {',`function checkForScriptUpdate(force = false) {
+        updateCheckMessage='助手 '+VERSION+' 随客户端更新；此处不执行篡改猴安装';
+        if(force)renderPanel(getState());
+        return;\n`);
 if(helper.split("document.querySelector('video')").length!==4)throw new Error('Video adapter seam changed');
 helper=helper.replaceAll("document.querySelector('video')",'findClientVideo()');
 for(const marker of ['function detectVisiblePlayerLessonTitle(state = getState()) {','function hasBlockingQuestion() {','function dismissKnownContinuePrompt() {','function playerTick() {']){

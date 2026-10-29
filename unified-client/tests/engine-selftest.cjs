@@ -1,9 +1,15 @@
 'use strict';
 // Synthetic pages only: HTTPS is intercepted inside throwaway test sessions.
 // No user browser, credentials, profile or academy server is accessed.
-const assert=require('node:assert/strict');const {account}=require('../policy.cjs');
-module.exports=async({accounts,configure,open,pages,store,app})=>{
+const assert=require('node:assert/strict');const {account}=require('../policy.cjs');const {spawn}=require('node:child_process');
+module.exports=async({accounts,configure,open,pages,store,win,app})=>{
   try{
+    const secondary=await new Promise((resolve,reject)=>{
+      const child=spawn(process.execPath,[app.getAppPath(),'--self-test','--self-test-root='+app.getPath('userData')],{windowsHide:true});let output='';
+      const timer=setTimeout(()=>{child.kill();reject(new Error('secondary process did not exit'));},10000);
+      child.stdout.on('data',data=>{output+=data;});child.on('error',reject);child.on('exit',code=>{clearTimeout(timer);resolve({code,output});});
+    });
+    assert.equal(secondary.code,0);assert.ok(secondary.output.includes('SECONDARY_BLOCKED'),'second process must not open the same account directory');
     const a=account('synthetic A'),b=account('synthetic B');accounts.push(a,b);
     for(const item of [a,b]){
       const ses=configure(item.id);
@@ -67,8 +73,14 @@ module.exports=async({accounts,configure,open,pages,store,app})=>{
     await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
     await until(()=>pw.isAudioMuted());
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);
+    const oldView=pages.get(player).view;
+    pw.close();await until(()=>!pages.has(player));
+    assert.ok(!win.contentView.children.includes(oldView),'closed player must release its native child view');
+    await until(()=>Object.values(store(a.id)).some(v=>v?.phase==='player-manually-closed'));
+    assert.equal(otherPlayer.isDestroyed(),false,'closing account A player must preserve account B player');
+    assert.ok(!Object.values(store(a.id)).some(v=>Array.isArray(v)&&v.some(log=>log.event==='script-update-check-failed')),'embedded helper must not run a Tampermonkey-only update path');
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: separate cookies/storage, helper preload, distinct scopes, sandbox, Vue authorization, managed launch, nested media heartbeat and mute, viewport, duplicate limit, reload');
+    console.log('ENGINE PASS: single-instance lock; isolated cookies/storage/scopes; sandbox; Vue authorization; managed launch; nested media heartbeat/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };
