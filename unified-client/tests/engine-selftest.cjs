@@ -2,7 +2,7 @@
 // Synthetic pages only: HTTPS is intercepted inside throwaway test sessions.
 // No user browser, credentials, profile or academy server is accessed.
 const assert=require('node:assert/strict');const {account}=require('../policy.cjs');const {spawn}=require('node:child_process');const fs=require('node:fs'),path=require('node:path');
-module.exports=async({accounts,configure,open,pages,store,win,app})=>{
+module.exports=async({accounts,configure,open,pages,store,win,app,processControl})=>{
   try{
     const secondary=await new Promise((resolve,reject)=>{
       const child=spawn(process.execPath,[app.getAppPath(),'--self-test','--self-test-root='+app.getPath('userData')],{windowsHide:true});let output='';
@@ -57,7 +57,7 @@ module.exports=async({accounts,configure,open,pages,store,win,app})=>{
     for(const [wc,item] of [[aw,a],[bw,b]]){
       await wc.executeJavaScript(`(()=>{
         const fixture=document.createElement('div');fixture.id='pane-required';
-        fixture.innerHTML='<div class="item_box"><span class="item_title">Synthetic course</span><span class="item_status">未完成</span><div role="progressbar" aria-valuenow="0"></div></div>';
+        fixture.innerHTML='<span id="tab-required">必修(0/1)</span><div class="item_box"><span class="item_title">Synthetic course</span><span>学时：0.5</span><span class="item_status">未完成</span><div role="progressbar" aria-valuenow="0"></div></div>';
         document.body.append(fixture);
         fixture.__vue__={info:{playDomain:'https://cs1.gdgbpx.com/verify'},$$Request:{course_auth:${JSON.stringify('synthetic-auth-'+item.id)}},listNav:{requiredCourseList:{listInfo:[{courseName:'Synthetic course',resourceCode:'synthetic-resource',courseId:'synthetic-course'}]}}};
         location.hash='#/workshop/workshopindex/mergeClass?classId=synthetic';
@@ -111,6 +111,22 @@ module.exports=async({accounts,configure,open,pages,store,win,app})=>{
     await until(()=>Object.values(store(a.id)).some(v=>v?.phase==='player-manually-closed'));
     assert.equal(otherPlayer.isDestroyed(),false,'closing account A player must preserve account B player');
     assert.ok(!Object.values(store(a.id)).some(v=>Array.isArray(v)&&v.some(log=>log.event==='script-update-check-failed')),'embedded helper must not run a Tampermonkey-only update path');
+    const input=path.join(app.getPath('userData'),'control/inbox');fs.mkdirSync(input,{recursive:true});
+    for(const [action,expected]of [['inspect','inspected'],['retry','manual-or-unknown-pause'],['execute-js','unsupported-action']]){
+      const request={id:require('node:crypto').randomUUID(),accountId:a.id,action,at:Date.now()};fs.writeFileSync(path.join(input,request.id+'.json'),JSON.stringify(request));processControl();const result=JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'control/results',request.id+'.json'),'utf8'));assert.equal(result.result,expected);
+    }
+    await until(()=>Boolean(store(a.id).__clientLearning?.workshops?.synthetic));
+    assert.equal(store(a.id).__clientLearning.workshops.synthetic.total,1);
+    assert.equal(store(a.id).__clientLearning.workshops.synthetic.totalHours,0.5);
+    await panel.executeJavaScript('window.client.command("state")');
+    assert.ok((await panel.executeJavaScript('document.querySelector(".learning-details").textContent')).includes('必修完成'));
+    const retryState=store(a.id)[stateKey];store(a.id)[stateKey]={...retryState,status:'paused',phase:'player-open-failed',userPaused:false};
+    const validRequest={id:require('node:crypto').randomUUID(),accountId:a.id,action:'retry',at:Date.now()};
+    fs.writeFileSync(path.join(input,validRequest.id+'.json'),JSON.stringify(validRequest));processControl();
+    const receipt=path.join(app.getPath('userData'),'control/results',validRequest.id+'.json');await until(()=>fs.existsSync(receipt));
+    assert.equal(JSON.parse(fs.readFileSync(receipt,'utf8')).result,'dispatched-needs-verification');
+    fs.writeFileSync(path.join(input,validRequest.id+'.json'),JSON.stringify(validRequest));processControl();
+    assert.equal(JSON.parse(fs.readFileSync(receipt,'utf8')).result,'duplicate-not-replayed');
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
     console.log('ENGINE PASS: per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
     app.exit(0);

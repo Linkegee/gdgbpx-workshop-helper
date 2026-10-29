@@ -12,12 +12,12 @@ function report(version,accounts,pages,stores){
     const tabs=[...pages.values()].filter(p=>p.accountId===a.id);
     const scopes=new Set(tabs.map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));
     const values=stores.get(a.id)||{};
-    return {id:a.id,name:a.name,tabs:tabs.map(p=>({id:p.view.webContents.id,kind:p.parent?'player':'main',title:p.title,issue:p.issue,
+    return {id:a.id,name:a.name,learning:values.__clientLearning||null,tabs:tabs.map(p=>({id:p.view.webContents.id,kind:p.parent?'player':'main',title:p.title,issue:p.issue,
       url:p.view.webContents.getURL(),bounds:p.view.getBounds(),audioMuted:p.view.webContents.isAudioMuted(),
       frames:p.view.webContents.mainFrame.framesInSubtree.map(frame=>({url:frame.url}))})),scopes:[...scopes].map(id=>{
       const prefix='gdgbpx_account_v1:'+id+':';
       const state=values[prefix+'gdgbpx_workshop_helper_state_v1']||{};
-      return {scope:id,status:state.status,phase:state.phase,message:state.message,lesson:state.currentLessonTitle,progress:state.currentLessonProgress,
+      return {scope:id,status:state.status,phase:state.phase,message:state.message,lesson:state.currentLessonTitle,progress:state.currentLessonProgress,userPaused:Boolean(state.userPaused),maintenance:Boolean(state.maintenance),workshop:state.currentWorkshopTitle,classId:state.currentClassId,finishedWorkshops:state.finishedWorkshopTitles,
         settings:state.settings,heartbeat:values[prefix+'gdgbpx_workshop_helper_player_heartbeat_v1'],media:values[prefix+'gdgbpx_workshop_helper_media_heartbeat_v2'],
         logs:(values[prefix+'gdgbpx_workshop_helper_logs_v1']||[]).slice(-80)};
     })};

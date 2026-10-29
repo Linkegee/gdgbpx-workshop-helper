@@ -14,6 +14,22 @@ const clientReadCourseContext=(rootDocument,title='')=>{
   try{return contextBridge.executeInMainWorld({func:readCourseContextInPage,args:[{frameIndex,title:String(title)}]});}catch{return null;}
 };
 const call=(op,...args)=>ipcRenderer.sendSync('helper',op,args);
+if(window.top===window&&location.hostname==='gbpx.gd.gov.cn'){
+ const capture=()=>{try{const value=collectLearning(document,location.href);if(value)call('learning',value);}catch{}};
+ window.addEventListener('DOMContentLoaded',()=>setTimeout(capture,1500),{once:true});
+ window.addEventListener('hashchange',()=>setTimeout(capture,1500));setInterval(capture,10000);
+ ipcRenderer.on('client-control',async(_event,command)=>{
+  const action=command.action==='retry'?'continue':command.action==='start'?'start':null;
+  if(!action)return;
+  for(let attempt=0;attempt<30;attempt++){
+   if(Array.from(document.querySelectorAll('input[type="password"]')).some(n=>n.getClientRects().length)){ipcRenderer.send('client-control-result',command.id,'login-required');return;}
+   const button=document.querySelector('#gbpx-helper-panel [data-action="'+action+'"]');
+   if(button&&!button.disabled){capture();button.click();ipcRenderer.send('client-control-result',command.id,'dispatched-needs-verification');return;}
+   await new Promise(resolve=>setTimeout(resolve,200));
+  }
+  ipcRenderer.send('client-control-result',command.id,'helper-unavailable');
+ });
+}
 const GM_getValue=(key,fallback)=>{const r=call('get',key);return r?.found?r.value:fallback;};
 const GM_setValue=(key,value)=>call('set',key,value);
 const GM_deleteValue=key=>call('delete',key);

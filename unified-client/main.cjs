@@ -1,7 +1,10 @@
 'use strict';
 const {app,BrowserWindow,WebContentsView,session,ipcMain,clipboard,dialog,Menu,powerSaveBlocker,Notification,safeStorage}=require('electron');
 const fs=require('node:fs'),path=require('node:path');
-const {allowedPage,partition,account,summarize}=require('./policy.cjs');
+const {allowedPage,partition,account,summarize,canResume}=require('./policy.cjs');
+const {ingestLearning}=require('./learning.cjs');
+const {recoveryDecision}=require('./recovery.cjs');
+const {randomUUID}=require('node:crypto');
 const {report}=require('./diagnostics.cjs');
 const {createStoreWriter}=require('./store-writer.cjs');
 const HOME='https://gbpx.gd.gov.cn/gdceportal/index.aspx';
@@ -13,14 +16,15 @@ const primary=app.requestSingleInstanceLock();
 if(!primary){console.log('SECONDARY_BLOCKED');app.quit();}
 app.on('second-instance',()=>{if(win&&!win.isDestroyed()){if(win.isMinimized())win.restore();win.show();win.focus();}});
 let win,accounts=[],active='',diagnosticsTimer,blocker=null,closing=false,barkConfig=null,panelPreferences={};
+let controlLedger={seen:{},budgets:{}},targets={accounts:[]};const pendingControl=new Map(),resumeOnLoad=new Set();
 const pages=new Map(),stores=new Map(),configured=new Set(),alerts=new Map();
-function read(name,fallback){const file=path.join(app.getPath('userData'),name);return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):fallback;}
+function read(name,fallback){const file=path.join(app.getPath('userData'),name);return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,'')):fallback;}
 function write(name,value){const file=path.join(app.getPath('userData'),name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);}
 const storeWriter=createStoreWriter({setTimeout,clearTimeout,write:id=>write('helper-'+id+'.json',stores.get(id)),onError:()=>notify('storage','本地状态保存失败，请检查磁盘空间。')});
 function store(id){if(!stores.has(id))stores.set(id,read('helper-'+id+'.json',{}));return stores.get(id);}
 function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;alerts.set(key,Date.now());if(Notification.isSupported())new Notification({title:'学院统一客户端',body:message}).show();if(barkConfig&&!selfTest)session.defaultSession.fetch('https://api.day.app/push',{method:'POST',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_key:barkConfig.key,title:'学院客户端需要检查',body:message,group:'干部学院'}),signal:AbortSignal.timeout(15000)}).catch(()=>{});}
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
-function snapshot(){return {accounts:accounts.map(a=>({...a,collapsed:panelPreferences[a.id]!==false,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,barkEnabled:Boolean(barkConfig)};}
+function snapshot(){return {accounts:accounts.map(a=>({...a,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
 function layout(){if(!win||win.isDestroyed())return;const {width,height}=win.getContentBounds();for(const p of pages.values()){const show=p.view.webContents.id===active;p.view.setBounds({x:300,y:68,width:Math.max(1,width-300),height:Math.max(1,height-68)});p.view.setVisible(show);}update();}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
@@ -46,7 +50,7 @@ function open(accountId,url=HOME,parent=null,focus=true){
   wc.on('will-navigate',(event,target)=>{if(!allowedPage(target)){event.preventDefault();p.issue='已阻止跳转至学院之外的地址';update();}});
   wc.on('will-redirect',(event,target)=>{if(!allowedPage(target))event.preventDefault();});
   wc.on('page-title-updated',(_event,title)=>{p.title=title;update();});
-  wc.on('did-finish-load',()=>{p.issue='';update();});
+  wc.on('did-finish-load',()=>{p.issue='';update();if(!p.parent&&resumeOnLoad.has(accountId)&&new URL(wc.getURL()).pathname==='/gdceportal/index.aspx'){resumeOnLoad.delete(accountId);wc.send('client-control',{id:'startup-'+randomUUID(),action:'start'});}});
   wc.on('did-fail-load',(_e,code,_description,_url,isMainFrame)=>{if(isMainFrame&&code!==-3){p.issue='页面加载失败，请查看该账号后重试';notify(accountId,p.issue);update();}});
   wc.on('render-process-gone',()=>{p.issue='页面进程已退出；请点击重新加载。不会自动新开播放器。';notify(accountId,p.issue);update();});
   wc.on('unresponsive',()=>{p.issue='页面暂时无响应';notify(accountId,p.issue);update();});
@@ -61,6 +65,12 @@ ipcMain.on('helper',(event,op,args=[])=>{
     const p=sender(event),values=store(p.accountId),[key,value]=args;
     switch(op){
       case 'id':event.returnValue=event.sender.id;break;
+      case 'learning':{
+        if(event.senderFrame!==event.sender.mainFrame||new URL(event.senderFrame.url).hostname!=='gbpx.gd.gov.cn')throw new Error('Invalid learning source');
+        const task=values['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1'];
+        values.__clientLearning=ingestLearning(values.__clientLearning,key,task?.currentWorkshopTitle);
+        storeWriter.schedule(p.accountId);update();event.returnValue=true;break;
+      }
       case 'get':event.returnValue=key==='gdgbpx_bark_config_v1'?{found:Boolean(barkConfig),value:barkConfig}:{found:Object.hasOwn(values,key),value:values[key]};break;
       case 'set':case 'delete':{
         if(typeof key!=='string'||key.length>300)throw new Error('Invalid key');
@@ -91,6 +101,28 @@ ipcMain.handle('helper-request',async(event,request)=>{
   }catch{return {error:true};}
 });
 function trustedPanel(event){return event.sender===win.webContents&&event.senderFrame===win.webContents.mainFrame;}
+function finishControl(request,result){write('control/results/'+request.id+'.json',{id:request.id,accountId:request.accountId,action:request.action,result,at:Date.now()});try{fs.unlinkSync(path.join(app.getPath('userData'),'control/inbox',request.id+'.json'));}catch{}}
+ipcMain.on('client-control-result',(event,id,result)=>{try{const p=sender(event),request=pendingControl.get(id);if(!request||request.accountId!==p.accountId)return;pendingControl.delete(id);finishControl(request,String(result));}catch{}});
+function processControl(){
+ const dir=path.join(app.getPath('userData'),'control/inbox');fs.mkdirSync(dir,{recursive:true});
+ for(const file of fs.readdirSync(dir).filter(f=>/^[a-f0-9-]{36}\.json$/.test(f)).slice(0,20)){
+  let request;try{const filename=path.join(dir,file);if(fs.statSync(filename).size>16000)continue;request=JSON.parse(fs.readFileSync(filename,'utf8'));}catch{continue;}
+  if(!request||file!==request.id+'.json')continue;if(pendingControl.has(request.id))continue;
+  if(controlLedger.seen[request.id]){finishControl(request,'duplicate-not-replayed');continue;}
+  const p=[...pages.values()].find(p=>p.accountId===request.accountId&&!p.parent);
+  const state=p?store(p.accountId)['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1']:null;
+  const decision=recoveryDecision(request,state,controlLedger.budgets[request.accountId]);
+  if(!p||!decision.allowed){finishControl(request,p?decision.reason:'account-unavailable');continue;}
+  controlLedger.seen[request.id]=Date.now();
+  controlLedger.seen=Object.fromEntries(Object.entries(controlLedger.seen).sort((a,b)=>b[1]-a[1]).slice(0,1000));
+  if(['retry','reload-main'].includes(request.action)){const old=controlLedger.budgets[p.accountId]||{};controlLedger.budgets[p.accountId]={lastAt:Date.now(),attempts:[...(old.attempts||[]).filter(at=>Date.now()-at<3600000),Date.now()]};}
+  write('control-ledger.json',controlLedger);
+  if(request.action==='inspect'){update();finishControl(request,'inspected');}
+  if(request.action==='notify'){notify('codex:'+p.accountId,'账号标识 '+p.accountId.slice(0,6)+' 需要检查；Codex未能确认自动恢复，请查看客户端。');finishControl(request,barkConfig?'notification-attempted':'desktop-only-bark-unconfigured');}
+  if(request.action==='reload-main'){p.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}
+  if(request.action==='retry'){pendingControl.set(request.id,request);p.view.webContents.send('client-control',{id:request.id,action:'retry'});setTimeout(()=>{if(pendingControl.delete(request.id))finishControl(request,'delivery-unknown');},10000);}
+ }
+}
 ipcMain.handle('panel-command',async(event,op,id)=>{
   if(!trustedPanel(event))return;
   if(op==='state'){update();return;}
@@ -117,6 +149,8 @@ app.whenReady().then(async()=>{
   const savedPanel=read('panel.json',{});
   panelPreferences=Object.fromEntries(Object.entries(savedPanel&&typeof savedPanel==='object'?savedPanel:{}).filter(([id,value])=>/^[a-f0-9-]{36}$/.test(id)&&typeof value==='boolean'));
   accounts=read('accounts.json',[]);if(!Array.isArray(accounts))throw new Error('账号配置格式错误');for(const a of accounts)partition(a.id);
+  controlLedger=read('control-ledger.json',{seen:{},budgets:{}});targets=read('watch-targets.json',{accounts:[]});
+  if(!selfTest)for(const a of accounts)if(canResume(a.id,store(a.id),targets))resumeOnLoad.add(a.id);
   if(!selfTest&&!accounts.length){accounts=[account('账号 1'),account('账号 2')];write('accounts.json',accounts);}
   const savedBark=read('bark.json',null);
   if(savedBark&&safeStorage.isEncryptionAvailable()){try{barkConfig={key:safeStorage.decryptString(Buffer.from(savedBark.key,'base64')),minutes:savedBark.minutes};}catch{}}
@@ -136,7 +170,8 @@ app.whenReady().then(async()=>{
   },15000).unref();
   // Restore account entry points only. Never resurrect expired player URLs.
   for(const a of accounts)open(a.id);
-  if(selfTest){closing=true;await require('./tests/engine-selftest.cjs')({accounts,configure,open,pages,store,win,app});}
+  if(!selfTest)setInterval(()=>{try{processControl();}catch{notify('control','本机恢复通道出现错误，请检查客户端。');}},2000).unref();
+  if(selfTest){closing=true;await require('./tests/engine-selftest.cjs')({accounts,configure,open,pages,store,win,app,processControl});}
 }).catch(error=>{dialog.showErrorBox('客户端启动失败',error.message);app.quit();});
 app.on('window-all-closed',()=>app.quit());
 app.on('will-quit',()=>{clearTimeout(diagnosticsTimer);storeWriter.dispose();});
