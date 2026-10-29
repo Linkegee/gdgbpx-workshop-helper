@@ -26,7 +26,7 @@ function createCard(id){
  header.append(title,badge,toggle);
  const course=element('p','course-summary'),progressRow=element('div','progress-row'),progress=element('progress','course-progress'),progressText=element('span','progress-text');progress.max=100;progressRow.append(progress,progressText);
  const issue=element('p','issue');issue.setAttribute('role','status');
- const actions=element('div','account-actions'),play=button('▶ 查看播放','player',id),home=button('专题 / 首页','home',id);actions.append(play,home);
+ const actions=element('div','account-actions'),play=button('▶ 查看播放','player',id),home=button('专题 / 首页','home',id);actions.append(play,home,button('重绘画面','repaint',id));
  const renameLabel=element('label','rename-label','账号备注'),rename=element('input','account-rename');rename.setAttribute('aria-label','账号备注');rename.maxLength=40;rename.onchange=()=>window.client.command('rename',{accountId:id,name:rename.value});renameLabel.append(rename);
  const individual=element('div','account-actions');for(const [text,action]of [['开始 / 继续','start'],['暂停','pause'],['停止','stop']])individual.append(button(text,'account-action',{accountId:id,action}));
  const commandResult=element('p','command-result');commandResult.setAttribute('role','status');
@@ -37,9 +37,11 @@ function createCard(id){
 function updateCard(card,a,state){
  card.title.textContent=a.name;card.title.title=a.name;
  card.details.hidden=a.collapsed;card.toggle.textContent=a.collapsed?'展开 ▾':'收纳 ▴';card.toggle.setAttribute('aria-expanded',String(!a.collapsed));card.toggle.setAttribute('aria-label',(a.collapsed?'展开':'收纳')+a.name+'详细信息');
- const current=a.states.find(s=>s.status==='running')||a.states[0];
+ const current=a.states.filter(s=>s.status==='running').sort((a,b)=>(b.media?.at||0)-(a.media?.at||0))[0]||a.states[0];
  const problem=a.tabs.find(t=>t.issue)?.issue||a.states.find(s=>['account-context-changed','login-required','player-open-failed','completed-close-failed','identity-entry-failed','player-lesson-mismatch'].includes(s.phase))?.message||'';
- const label=problem?'需处理':({running:'运行中',paused:'已暂停',stopped:'已停止',complete:'已完成'}[current?.status]||'未启动');
+ const ended=current?.media?.duration>0&&current.media.currentTime>=current.media.duration-1&&current.media.paused===true;
+ const mediaLabel=ended?'结束待核验':current?.media?.at&&Date.now()-current.media.at>120000?'心跳过期':current?.media?.paused===true?'媒体暂停':'运行中';
+ const label=problem?'需处理':current?.status==='running'?mediaLabel:({paused:'已暂停',stopped:'已停止',complete:'已完成'}[current?.status]||'未启动');
  card.badge.textContent=label;card.badge.className='badge '+(problem?'attention':current?.status==='running'?'running':'neutral');
  card.section.classList.toggle('needs-attention',Boolean(problem));
  card.course.textContent=current?.lesson||'尚未选择课程';card.course.title=card.course.textContent;
@@ -68,6 +70,7 @@ window.client.onState(state=>{
  const live=new Set(state.accounts.map(a=>a.id));for(const [id,card]of cards)if(!live.has(id)){card.section.remove();cards.delete(id);}
  for(const a of state.accounts){if(!cards.has(a.id))cards.set(a.id,createCard(a.id));updateCard(cards.get(a.id),a,state);}
  const running=state.accounts.filter(a=>a.states.some(s=>s.status==='running')).length;
- document.getElementById('account-count').textContent=state.accounts.length+' 个账号 · '+running+' 个运行中';
+ const playing=state.accounts.filter(a=>a.states.some(s=>s.status==='running'&&s.media?.paused===false&&Date.now()-s.media.at<20000)).length;
+ document.getElementById('account-count').textContent=state.accounts.length+' 个账号 · '+running+' 任务 / '+playing+' 播放';
 });
 window.client.command('state');

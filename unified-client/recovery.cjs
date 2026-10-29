@@ -1,8 +1,8 @@
 'use strict';
 function recoveryDecision(request,state,budget={},now=Date.now()){
  if(!request||!/^[a-f0-9-]{36}$/.test(request.id||'')||!Number.isFinite(request.at)||now-request.at<0||now-request.at>60000)return {allowed:false,reason:'invalid-or-expired'};
- if(!['inspect','retry','reload-main','reload-player','notify'].includes(request.action))return {allowed:false,reason:'unsupported-action'};
- if(['inspect','notify'].includes(request.action))return {allowed:true};
+ if(!['inspect','capture-player','repaint-player','retry','reload-main','reload-player','notify'].includes(request.action))return {allowed:false,reason:'unsupported-action'};
+ if(['inspect','notify','capture-player','repaint-player'].includes(request.action))return {allowed:true};
  if(!state||state.userPaused||['idle','complete','stopped'].includes(state.status))return {allowed:false,reason:'not-running-or-user-stopped'};
  if(['login-required','account-context-changed','maintenance-login','identity-entry-failed'].includes(state.phase))return {allowed:false,reason:'human-login-required'};
  if(state.status==='paused'&&!['player-open-failed','completed-close-failed','completion-unverified','player-stalled'].includes(state.phase))return {allowed:false,reason:'manual-or-unknown-pause'};

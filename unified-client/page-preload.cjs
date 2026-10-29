@@ -14,6 +14,14 @@ const clientReadCourseContext=(rootDocument,title='')=>{
   try{return contextBridge.executeInMainWorld({func:readCourseContextInPage,args:[{frameIndex,title:String(title)}]});}catch{return null;}
 };
 const call=(op,...args)=>ipcRenderer.sendSync('helper',op,args);
+if(window.top===window){
+ const visual=()=>{try{
+  const video=findClientVideo(),body=document.body,rect=video?.getBoundingClientRect(),style=body?getComputedStyle(body):null;
+  // Counts/geometry only; never send DOM text, credentials or page HTML.
+  call('visual',{bodyChildren:body?.children.length||0,textChars:body?.innerText?.length||0,frames:document.querySelectorAll('iframe').length,hasVideo:Boolean(video),bodyVisible:Boolean(style&&style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity)>0),videoVisible:Boolean(rect&&rect.width>0&&rect.height>0),videoWidth:rect?.width||0,videoHeight:rect?.height||0,width:innerWidth,height:innerHeight,helperPresent:Boolean(document.getElementById('gbpx-helper-panel')),readyState:document.readyState});
+ }catch{}};
+ window.addEventListener('DOMContentLoaded',()=>setTimeout(visual,1500),{once:true});setInterval(visual,10000);
+}
 if(window.top===window&&location.hostname==='gbpx.gd.gov.cn'){
  const capture=()=>{try{const value=collectLearning(document,location.href);if(value)call('learning',value);}catch{}};
  window.addEventListener('DOMContentLoaded',()=>setTimeout(capture,1500),{once:true});

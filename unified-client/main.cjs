@@ -8,6 +8,7 @@ const {randomUUID}=require('node:crypto');
 const {report}=require('./diagnostics.cjs');
 const {createStoreWriter}=require('./store-writer.cjs');
 const {createBatch}=require('./batch.cjs');
+const {present}=require('./presentation.cjs');
 const HOME='https://gbpx.gd.gov.cn/gdceportal/index.aspx';
 const SELF=path.join(__dirname,'shell.html');
 const selfTest=process.argv.includes('--self-test');
@@ -33,7 +34,7 @@ function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;al
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
 function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
-function layout(){if(!win||win.isDestroyed())return;const {width,height}=win.getContentBounds();for(const p of pages.values()){const show=p.view.webContents.id===active;p.view.setBounds({x:300,y:68,width:Math.max(1,width-300),height:Math.max(1,height-68)});p.view.setVisible(show);}update();}
+function layout(){if(!win||win.isDestroyed())return;present({win,pages,active});update();}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
 function configure(id){
   const ses=session.fromPartition(partition(id));if(configured.has(id))return ses;configured.add(id);
@@ -72,6 +73,13 @@ ipcMain.on('helper',(event,op,args=[])=>{
     const p=sender(event),values=store(p.accountId),[key,value]=args;
     switch(op){
       case 'id':event.returnValue=event.sender.id;break;
+      case 'visual':{
+        if(event.senderFrame!==event.sender.mainFrame||!key||typeof key!=='object')throw new Error('Invalid visual probe');
+        const valid={};for(const field of ['bodyChildren','textChars','frames','videoWidth','videoHeight','width','height'])if(Number.isFinite(key[field]))valid[field]=Math.max(0,Math.min(1000000,key[field]));
+        for(const field of ['hasVideo','bodyVisible','videoVisible','helperPresent'])valid[field]=key[field]===true;
+        if(['loading','interactive','complete'].includes(key.readyState))valid.readyState=key.readyState;
+        p.visual={...valid,at:Date.now()};event.returnValue=true;break;
+      }
       case 'learning':{
         if(event.senderFrame!==event.sender.mainFrame||new URL(event.senderFrame.url).hostname!=='gbpx.gd.gov.cn')throw new Error('Invalid learning source');
         const task=values['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1'];
@@ -149,6 +157,15 @@ function processControl(){
   if(['retry','reload-main','reload-player'].includes(request.action)){const old=controlLedger.budgets[p.accountId]||{};controlLedger.budgets[p.accountId]={lastAt:Date.now(),attempts:[...(old.attempts||[]).filter(at=>Date.now()-at<3600000),Date.now()]};}
   write('control-ledger.json',controlLedger);
   if(request.action==='inspect'){update();finishControl(request,'inspected');}
+  if(['capture-player','repaint-player'].includes(request.action)){
+    const child=[...pages.values()].find(c=>c.parent===p.view.webContents.id&&c.accountId===p.accountId);
+    if(!child){finishControl(request,'player-unavailable');continue;}
+    if(request.action==='repaint-player'){active=child.view.webContents.id;child.view.setVisible(false);layout();}
+    pendingControl.set(request.id,request);
+    child.view.webContents.capturePage(undefined,{stayHidden:request.action==='capture-player',stayAwake:true}).then(image=>{
+      const file='diagnostics/visual-'+request.id+'.png';fs.mkdirSync(path.join(app.getPath('userData'),'diagnostics'),{recursive:true});fs.writeFileSync(path.join(app.getPath('userData'),file),image.toPNG());pendingControl.delete(request.id);finishControl(request,'captured-local:'+file);
+    }).catch(()=>{pendingControl.delete(request.id);finishControl(request,'capture-failed');});
+  }
   if(request.action==='notify'){notify('codex:'+p.accountId,'账号标识 '+p.accountId.slice(0,6)+' 需要检查；Codex未能确认自动恢复，请查看客户端。');finishControl(request,barkConfig?'notification-attempted':'desktop-only-bark-unconfigured');}
   if(request.action==='reload-main'){p.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}
   if(request.action==='reload-player'){const child=[...pages.values()].find(c=>c.parent===p.view.webContents.id&&c.accountId===p.accountId);if(child){child.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}else finishControl(request,'player-unavailable');}
@@ -175,6 +192,7 @@ ipcMain.handle('panel-command',async(event,op,id)=>{
   if(op==='show'&&p){active=Number(id);layout();}
   if(op==='player'&&accounts.some(a=>a.id===id)){const player=[...pages.values()].find(p=>p.accountId===id&&p.parent);if(player){active=player.view.webContents.id;layout();}}
   if(op==='home'&&accounts.some(a=>a.id===id)){const old=[...pages.values()].find(p=>p.accountId===id&&!p.parent);if(old){active=old.view.webContents.id;layout();}else open(id);}
+  if(op==='repaint'&&accounts.some(a=>a.id===id)){const player=[...pages.values()].find(p=>p.accountId===id&&p.parent);if(player){active=player.view.webContents.id;player.view.setVisible(false);layout();player.view.webContents.capturePage(undefined,{stayAwake:true}).catch(()=>{});}}
   if(op==='reload'&&p)p.view.webContents.reload();
   if(op==='menu'&&p){Menu.buildFromTemplate([...p.menus].map(name=>({label:name,click:()=>p.view.webContents.send('helper-menu',name)}))).popup({window:win});}
   if(op==='close'&&p){const answer=await dialog.showMessageBox(win,{type:'question',message:'关闭此页面？正在观看的课程会中断。',buttons:['取消','关闭'],defaultId:0,cancelId:0});if(answer.response===1)closePage(Number(id));}

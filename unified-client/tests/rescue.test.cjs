@@ -19,3 +19,4 @@ test('a command receipt is insufficient to prove recovery',()=>{
  assert.equal(recovered(before,{...before,status:'healthy',lesson:'b',mediaTime:1}),true);
  assert.equal(recovered(before,{...before,status:'needs-login',mediaTime:35}),false);
 });
+test('a failed recovery is not retried repeatedly for the same incident',()=>{const event={id:'a',status:'recoverable',phase:'watching-video',lesson:'l',action:'reload-main'};const ledger={incidents:{[incidentKey(event)]:{at:1e9,status:'recovery-unverified'}}};assert.equal(candidate(event,ledger,1e9+1800000),false);});

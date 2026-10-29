@@ -3,7 +3,7 @@ const fs=require('node:fs'),path=require('node:path'),{randomUUID}=require('node
 const root=path.join(process.env.APPDATA||'', 'GanbuUnifiedClient');
 async function main(){
  const [accountId,action]=process.argv.slice(2);
- if(!/^[a-f0-9-]{36}$/.test(accountId||'')||!['inspect','retry','reload-main','reload-player','notify'].includes(action))throw new Error('Usage: node control.cjs ACCOUNT_UUID inspect|retry|reload-main|reload-player|notify');
+ if(!/^[a-f0-9-]{36}$/.test(accountId||'')||!['inspect','capture-player','repaint-player','retry','reload-main','reload-player','notify'].includes(action))throw new Error('Usage: node control.cjs ACCOUNT_UUID inspect|capture-player|repaint-player|retry|reload-main|reload-player|notify');
  const request={id:randomUUID(),accountId,action,at:Date.now()},dir=path.join(root,'control/inbox');fs.mkdirSync(dir,{recursive:true});
  const file=path.join(dir,request.id+'.json');fs.writeFileSync(file+'.tmp',JSON.stringify(request));fs.renameSync(file+'.tmp',file);
  const result=path.join(root,'control/results',request.id+'.json');

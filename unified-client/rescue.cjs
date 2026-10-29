@@ -1,9 +1,11 @@
 'use strict';
 const schema={type:'object',additionalProperties:false,properties:{action:{type:'string',enum:['retry','reload-main','reload-player','escalate','wait']},reason:{type:'string'}},required:['action','reason']};
-function incidentKey(result){return result.id+':'+result.status+':'+(result.phase||'');}
+function incidentKey(result){return [result.id,result.status,result.phase||'',result.lesson||'',result.reason||''].join(':');}
 function candidate(result,ledger,now=Date.now()){
  if(!['recoverable','needs-login','needs-user','offline-or-stale'].includes(result.status))return false;
- return now-(ledger.incidents?.[incidentKey(result)]?.at||0)>=900000;
+ const last=ledger.incidents?.[incidentKey(result)];
+ if(last&&!last.resolvedAt&&['recovery-unverified','command-refused-or-unacknowledged','needs-user'].includes(last.status))return false;
+ return now-(last?.at||0)>=900000;
 }
 function permitted(plan,result){
  if(!plan||typeof plan.reason!=='string'||!schema.properties.action.enum.includes(plan.action))return false;

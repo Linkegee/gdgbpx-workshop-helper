@@ -16,6 +16,9 @@ helper=helper.replace(playerMarker,playerMarker+`\n        const context=clientR
 const reader=fs.readFileSync(path.join(base,'course-context.cjs'),'utf8').replace('module.exports={readCourseContextInPage};','');
 const media=fs.readFileSync(path.join(base,'media-context.cjs'),'utf8').replace('module.exports={findClientVideo,clientPlayerDocument};','');
 const learning=fs.readFileSync(path.join(base,'learning.cjs'),'utf8').replace('module.exports={collectLearning,ingestLearning};','');
+const transientStall="debugLog('warn', 'video-native-stalled', {";
+if(helper.split(transientStall).length!==2)throw new Error('Native stall logging seam changed');
+helper=helper.replace(transientStall,"debugLog(video.readyState >= 3 && !video.paused ? 'info' : 'warn', 'video-native-stalled', {");
 for(const marker of ['function getAvailableUpdate() {','function checkForScriptUpdate(force = false) {'])if(helper.split(marker).length!==2)throw new Error('Client version adapter seam changed');
 helper=helper.replace('function getAvailableUpdate() {','function getAvailableUpdate() {\n        return null;\n');
 helper=helper.replace('function checkForScriptUpdate(force = false) {',`function checkForScriptUpdate(force = false) {

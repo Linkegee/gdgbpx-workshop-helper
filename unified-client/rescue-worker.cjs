@@ -40,8 +40,8 @@ async function command(accountId,action){
 }
 let previous={},busy=false,active=null;
 function inspect(){const value=evaluate(read('watch-targets.json',{accounts:[]}),read('diagnostics/latest.json',null),previous);previous=value;return value;}
-function state(status,extra={}){write('rescue-status.json',{status,at:Date.now(),pid:process.pid,...extra});}
-async function alert(reason){if(fixture){write('fixture-alert.json',{reason});return;}await new Promise(resolve=>{const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'send-alert.ps1'),'-Reason',reason],{windowsHide:true,stdio:'ignore'});const timer=setTimeout(()=>{child.kill();resolve();},20000);child.on('error',()=>{clearTimeout(timer);resolve();});child.on('exit',()=>{clearTimeout(timer);resolve();});});}
+function state(status,extra={}){write('rescue-status.json',{last:read('rescue-status.json',null)?.last||null,status,at:Date.now(),pid:process.pid,...extra});}
+async function alert(reason,event=null){if(fixture){write('fixture-alert.json',{reason});return;}const args=['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'send-alert.ps1'),'-Reason',reason];if(event?.id){const account=read('diagnostics/latest.json',null)?.accounts?.find(a=>a.id===event.id),tail=String(account?.name||'').slice(-4);args.push('-Account',/^\d{4}$/.test(tail)?tail:event.id,'-Cause',event.reason==='ended-without-server-completion'?'Ended':event.action==='reload-player'?'Native':event.status==='offline-or-stale'?'Stale':event.status==='recoverable'?'Playback':'Unknown');}await new Promise(resolve=>{const child=spawn('powershell.exe',args,{windowsHide:true,stdio:'ignore'});const timer=setTimeout(()=>{child.kill();resolve();},20000);child.on('error',()=>{clearTimeout(timer);resolve();});child.on('exit',()=>{clearTimeout(timer);resolve();});});}
 async function tick(){
  if(busy)return;busy=true;
  try{
@@ -49,9 +49,10 @@ async function tick(){
   if(!enabled){state('disabled');return;}
   const owner=read('client-owner.json',null);if(owner?.running===false){state('watching',{note:'client-closed-by-user'});return;}
   const snapshot=inspect(),ledger=read('rescue-ledger.json',{incidents:{},attempts:[]});
+  let resolved=false;for(const item of snapshot.results.filter(r=>r.status==='healthy'&&r.advancing))for(const [key,value]of Object.entries(ledger.incidents||{})){if(key.startsWith(item.id+':')&&!value.resolvedAt){value.resolvedAt=Date.now();resolved=true;}}if(resolved)write('rescue-ledger.json',ledger);
   if(snapshot.allComplete){if(!ledger.completed){ledger.completed=true;write('rescue-ledger.json',ledger);await alert('Complete');}state('watching',{allComplete:true});return;}
   const event=snapshot.results.find(r=>candidate(r,ledger));
-  if(!event){state('watching');return;}
+  if(!event){const last=read('rescue-status.json',null)?.last;state('watching',{last:snapshot.results.some(r=>r.id===last?.accountId&&r.status==='healthy'&&r.advancing)?null:last||null});return;}
   const now=Date.now(),key=incidentKey(event);ledger.incidents[key]={at:now,status:'reserved'};ledger.attempts=(ledger.attempts||[]).filter(t=>now-t<3600000);
   write('rescue-ledger.json',ledger);active={accountId:event.id,status:event.status};state('handling',active);
   let plan;
@@ -72,9 +73,9 @@ async function tick(){
     else throw new Error('recovery-unverified');
    }else{
     ledger.incidents[key].status=plan.action==='wait'?'deferred':'needs-user';
-    if(plan.action==='escalate')await alert(event.status==='needs-login'?'Login':event.status==='offline-or-stale'?'Offline':'Failed');
+    if(plan.action==='escalate')await alert(event.status==='needs-login'?'Login':event.status==='offline-or-stale'?'Offline':'Failed',event);
    }
-  }catch(error){ledger.incidents[key].status=String(error.message);await alert(event.status==='needs-login'?'Login':event.status==='offline-or-stale'?'Offline':'Failed');}
+  }catch(error){ledger.incidents[key].status=String(error.message);await alert(event.status==='needs-login'?'Login':event.status==='offline-or-stale'?'Offline':'Failed',event);}
   finally{write('rescue-ledger.json',ledger);state('watching',{last:{accountId:event.id,...ledger.incidents[key]}});active=null;}
  }finally{busy=false;}
 }

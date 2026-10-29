@@ -102,6 +102,22 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     await until(()=>!pw.isAudioMuted());
     const otherPlayer=[...pages.values()].find(p=>p.parent===bid).view.webContents;
     assert.equal(otherPlayer.isAudioMuted(),true,'changing one account mute must not unmute another account');
+    const locationBefore=pw.getURL();
+    for(const id of [a.id,b.id,a.id,b.id,a.id]){
+      await panel.executeJavaScript(`window.client.command('player',${JSON.stringify(id)})`);
+      const selected=[...pages.values()].find(p=>p.accountId===id&&p.parent);
+      assert.equal(win.contentView.children.at(-1),selected.view,'selected player must be the top native view');
+    }
+    await panel.executeJavaScript(`window.client.command('repaint',${JSON.stringify(a.id)})`);
+    assert.equal(pw.getURL(),locationBefore,'repaint must never navigate a playing page');assert.equal(pw.isDestroyed(),false);
+    await pw.executeJavaScript("document.documentElement.style.backgroundColor='rgb(17,51,85)'");
+    const captureRequest={id:require('node:crypto').randomUUID(),accountId:a.id,action:'capture-player',at:Date.now()};
+    const captureDir=path.join(app.getPath('userData'),'control/inbox');fs.mkdirSync(captureDir,{recursive:true});fs.writeFileSync(path.join(captureDir,captureRequest.id+'.json'),JSON.stringify(captureRequest));processControl();
+    const captureReceipt=path.join(app.getPath('userData'),'control/results',captureRequest.id+'.json');await until(()=>fs.existsSync(captureReceipt));
+    const captured=JSON.parse(fs.readFileSync(captureReceipt,'utf8'));assert.ok(captured.result.startsWith('captured-local:diagnostics/visual-'));
+    assert.ok(fs.statSync(path.join(app.getPath('userData'),captured.result.slice('captured-local:'.length))).size>100);
+    const pixels=require('electron').nativeImage.createFromPath(path.join(app.getPath('userData'),captured.result.slice('captured-local:'.length))).toBitmap();
+    assert.deepEqual([...pixels.subarray(0,3)],[85,51,17],'capture must contain the selected fixture surface, not a white bitmap');
     await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
     await until(()=>pw.isAudioMuted());
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);
