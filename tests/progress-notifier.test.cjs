@@ -9,3 +9,26 @@ test('disabled config and changing lessons do not generate stale alerts',()=>{co
 
 test('manual test uses same transport without altering monitor ledger and throttles repeat clicks',()=>{const h=setup();h.n.tick(state);const before=JSON.stringify(h.values.get('gdgbpx_bark_watch_v1:account-A'));let result;h.n.test(r=>result=r);assert.equal(h.sent.length,1);assert.match(JSON.parse(h.sent[0].data).title,/测试/);h.sent[0].onload({status:200,responseText:'{"code":200}'});assert.equal(result,'accepted');assert.equal(JSON.stringify(h.values.get('gdgbpx_bark_watch_v1:account-A')),before);h.n.test(r=>result=r);assert.equal(result,'rate-limited');assert.equal(h.sent.length,1);});
 test('manual test reports missing configuration, rejected response and timeout',()=>{const h=setup();let result;h.n.configure('');h.n.test(r=>result=r);assert.equal(result,'not-configured');assert.equal(h.sent.length,0);h.n.configure('fake-test-key');h.n.test(r=>result=r);h.sent[0].onload({status:200,responseText:'bad-json'});assert.equal(result,'rejected');h.advance(1);h.n.test(r=>result=r);h.sent[1].ontimeout();assert.equal(result,'delivery-unknown');});
+
+test('authorization failure alerts promptly without course progress and deduplicates across reload',()=>{
+ const h=setup(),failed={...state,status:'paused',phase:'login-required',currentLessonKey:''};
+ h.n.tick(failed);assert.equal(h.sent.length,1);assert.match(JSON.parse(h.sent[0].data).body,/授权|登录/);
+ h.n.tick(failed);createProgressNotifier(h.api,'account-A',()=>1000001).tick(failed);assert.equal(h.sent.length,1);
+ h.n.tick(state);h.n.tick(failed);assert.equal(h.sent.length,2);
+});
+test('manual pause and maintenance suppress exception alerts',()=>{
+ for(const change of [{userPaused:true},{maintenance:{notice:'maintenance'}}]){
+  const h=setup();h.n.tick({...state,status:'paused',phase:'login-required',...change});assert.equal(h.sent.length,0);
+ }
+});
+test('maintenance login failure and unresolved lesson mismatch alert without cross-account spill',()=>{
+ for(const phase of ['maintenance-login','player-lesson-mismatch','identity-entry-failed','completed-close-failed']){
+  const h=setup();h.n.tick({...state,status:'paused',phase,maintenance:phase==='maintenance-login'?{}:null});
+  assert.equal(h.sent.length,1,phase);h.n.tick({...state,status:'paused',phase,maintenance:phase==='maintenance-login'?{}:null});assert.equal(h.sent.length,1);
+ }
+});
+test('stuck navigation before a course is selected still alerts without pretending a course exists',()=>{
+ const h=setup(),waiting={...state,phase:'entering-workshop',currentLessonKey:'',currentLessonTitle:''};
+ h.n.tick(waiting);h.advance(10);h.n.tick(waiting);assert.equal(h.sent.length,1);
+ assert.match(JSON.parse(h.sent[0].data).body,/未知/);
+});
