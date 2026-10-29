@@ -109,9 +109,9 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
       const selected=[...pages.values()].find(p=>p.accountId===id&&p.parent);
       assert.equal(win.contentView.children.at(-1),selected.view,'selected player must be the top native view');
     }
+    // Prime the hidden test window compositor through the existing internal capture path.
     await panel.executeJavaScript(`window.client.command('repaint',${JSON.stringify(a.id)})`);
-    assert.equal(pw.getURL(),locationBefore,'repaint must never navigate a playing page');assert.equal(pw.isDestroyed(),false);
-    await pw.executeJavaScript("document.documentElement.style.backgroundColor='rgb(17,51,85)'");
+    await pw.executeJavaScript("document.documentElement.style.backgroundColor='rgb(17,51,85)';new Promise(resolve=>{requestAnimationFrame(()=>requestAnimationFrame(resolve));setTimeout(resolve,500)})");
     const captureRequest={id:require('node:crypto').randomUUID(),accountId:a.id,action:'capture-player',at:Date.now()};
     const captureDir=path.join(app.getPath('userData'),'control/inbox');fs.mkdirSync(captureDir,{recursive:true});fs.writeFileSync(path.join(captureDir,captureRequest.id+'.json'),JSON.stringify(captureRequest));processControl();
     const captureReceipt=path.join(app.getPath('userData'),'control/results',captureRequest.id+'.json');await until(()=>fs.existsSync(captureReceipt));
@@ -129,6 +129,21 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     assert.equal(selectedPage.view.getVisible(),true);assert.equal(win.contentView.children.at(-1),selectedPage.view);
     assert.equal(pw.getURL(),locationBefore,'automatic white-screen repair must not reload a healthy player');
     assert.equal(otherPlayer.isDestroyed(),false);assert.equal([...pages.values()].find(p=>p.view.webContents===otherPlayer).view.getVisible(),siblingVisible,'repair must preserve the background account visibility');
+    await panel.executeJavaScript('document.getElementById("overview-button").click()');
+    await until(async()=>await panel.executeJavaScript('!document.getElementById("overview").hidden'));
+    assert.equal([...pages.values()].every(p=>!p.view.getVisible()),true,'overview must expose shell without closing any native page');
+    assert.equal(await panel.executeJavaScript('document.querySelectorAll("#overview-table tbody tr").length'),accounts.length);
+    assert.equal(await panel.executeJavaScript('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="重绘画面")'),false);
+    assert.equal(pw.getURL(),locationBefore);assert.equal(pw.isDestroyed(),false);
+    await panel.executeJavaScript(`updateOverview({active:'',accounts:Array.from({length:8},(_,i)=>({id:'preview-'+i,name:'测试账号 '+(i+1),states:[{status:'running',classId:'topic',lesson:'示例课程：专题学习内容',progress:42,media:{paused:false,at:Date.now()}}],tabs:[],learning:{home:i===0?null:{hours:25+i,at:Date.now()},currentClassId:'topic',workshops:{topic:{title:'专题学习',at:Date.now(),completed:12+i,total:36,completedHours:11+i,totalHours:33,verificationComplete:true}}}})),rescue:{status:'watching',at:Date.now()},barkEnabled:true})`);
+    await panel.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+    fs.writeFileSync(path.join(__dirname,'..','test-data','overview-preview.png'),(await win.capturePage()).toPNG());
+    await panel.executeJavaScript('document.getElementById("overview-filter").value="attention";document.getElementById("overview-filter").dispatchEvent(new Event("change"))');
+    assert.equal(await panel.executeJavaScript('document.querySelectorAll("#overview-table tbody tr:not([hidden])").length'),0);
+    await panel.executeJavaScript('document.getElementById("overview-filter").value="all";document.getElementById("overview-filter").dispatchEvent(new Event("change"))');
+    assert.equal(await panel.executeJavaScript('document.querySelectorAll("#overview-table tbody tr:not([hidden])").length>0'),true);
+    await panel.executeJavaScript(`window.client.command('player',${JSON.stringify(a.id)})`);
+    assert.equal(pages.get(player).view.getVisible(),true);assert.equal(pw.getURL(),locationBefore);
     await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
     await until(()=>pw.isAudioMuted());
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);

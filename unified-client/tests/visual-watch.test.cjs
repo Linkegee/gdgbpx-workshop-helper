@@ -39,6 +39,11 @@ test('navigation during capture cancels stale detection without repairing the ne
 test('permanent white stops after two repaints, reports failure and does not loop',async()=>{
  const f=fixture({heal:false});await f.watch.scan(1);f.advance(10000);await f.watch.scan(1);assert.equal(f.paints,2);assert.equal(f.watch.get(1).phase,'needs-help');f.advance(60000);await f.watch.scan(1);assert.equal(f.paints,2);
 });
+test('navigation cannot reset the per-account hourly repaint budget',async()=>{
+ const f=fixture({heal:false});
+ for(let i=0;i<3;i++){f.watch.remove(1);await f.watch.scan(1);f.advance(10000);await f.watch.scan(1);}
+ assert.equal(f.paints,3);assert.equal(f.watch.get(1).phase,'needs-help');
+});
 test('manual holds, loading, capture failures and a single white frame never reload or alarm',async()=>{
  const f=fixture({manual:true});await f.watch.scan(1);assert.equal(f.paints,0);assert.equal(f.captures,0);
  const g=fixture();g.context.ready=false;await g.watch.scan(1);assert.equal(g.captures,0);

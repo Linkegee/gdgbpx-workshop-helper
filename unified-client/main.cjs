@@ -178,9 +178,9 @@ function processControl(){
     if(!child){finishControl(request,'player-unavailable');continue;}
     if(request.action==='repaint-player'){active=child.view.webContents.id;child.view.setVisible(false);layout();}
     pendingControl.set(request.id,request);
-    child.view.webContents.capturePage(undefined,{stayHidden:request.action==='capture-player',stayAwake:true}).then(image=>{
+    child.view.webContents.capturePage(undefined,{stayHidden:active!==child.view.webContents.id,stayAwake:true}).then(image=>{
       const file='diagnostics/visual-'+request.id+'.png';fs.mkdirSync(path.join(app.getPath('userData'),'diagnostics'),{recursive:true});fs.writeFileSync(path.join(app.getPath('userData'),file),image.toPNG());pendingControl.delete(request.id);finishControl(request,'captured-local:'+file);
-    }).catch(()=>{pendingControl.delete(request.id);finishControl(request,'capture-failed');});
+    }).catch(error=>{pendingControl.delete(request.id);finishControl(request,'capture-failed');});
   }
   if(request.action==='notify'){notify('codex:'+p.accountId,'账号标识 '+p.accountId.slice(0,6)+' 需要检查；Codex未能确认自动恢复，请查看客户端。');finishControl(request,barkConfig?'notification-attempted':'desktop-only-bark-unconfigured');}
   if(request.action==='reload-main'){p.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}
@@ -191,6 +191,7 @@ function processControl(){
 ipcMain.handle('panel-command',async(event,op,id)=>{
   if(!trustedPanel(event))return;
   if(op==='state'){update();return;}
+  if(op==='overview'){active='';layout();return;}
   if(op==='rescue-enabled'&&typeof id==='boolean'){write('rescue-config.json',{enabled:id});update();return;}
   if(op==='batch'&&['start','pause','stop'].includes(id)){batch.run(id).catch(()=>notify('batch','群控发送失败，请查看账号结果。'));return {accepted:true};}
   if(op==='account-action'&&accounts.some(a=>a.id===id?.accountId)&&['start','pause','stop'].includes(id.action)){batch.run(id.action,[id.accountId]).catch(()=>{});return {accepted:true};}

@@ -10,6 +10,7 @@ document.querySelector('.account-toolbar').before(group);
 let rescueEnabled=true;
 const rescueToggle=element('button','','关闭异常接管');rescueToggle.type='button';rescueToggle.onclick=()=>window.client.command('rescue-enabled',!rescueEnabled);group.append(rescueToggle);
 const resultLabels={'dispatched-needs-verification':'已下发，等待状态核验','already-running':'已在运行','already-stopped':'已停止','already-paused':'已暂停','already-complete':'专题已完成','login-required':'需重新登录','helper-unavailable':'助手未就绪','delivery-unknown':'未收到回执，请检查','account-unavailable':'页面未打开','dispatch-failed':'发送失败','cancelled-by-new-command':'已由新命令取消'};
+document.getElementById('overview-button').onclick=()=>window.client.command('overview');
 document.getElementById('add').onclick=()=>window.client.command('add');
 let collapseAllNext=false;
 document.getElementById('toggle-all').onclick=()=>window.client.command('collapse-all',collapseAllNext);
@@ -26,7 +27,7 @@ function createCard(id){
  header.append(title,badge,toggle);
  const course=element('p','course-summary'),progressRow=element('div','progress-row'),progress=element('progress','course-progress'),progressText=element('span','progress-text');progress.max=100;progressRow.append(progress,progressText);
  const issue=element('p','issue');issue.setAttribute('role','status');
- const actions=element('div','account-actions'),play=button('▶ 查看播放','player',id),home=button('专题 / 首页','home',id);actions.append(play,home,button('重绘画面','repaint',id));
+ const actions=element('div','account-actions'),play=button('▶ 查看播放','player',id),home=button('专题 / 首页','home',id);actions.append(play,home);
  const renameLabel=element('label','rename-label','账号备注'),rename=element('input','account-rename');rename.setAttribute('aria-label','账号备注');rename.maxLength=40;rename.onchange=()=>window.client.command('rename',{accountId:id,name:rename.value});renameLabel.append(rename);
  const individual=element('div','account-actions');for(const [text,action]of [['开始 / 继续','start'],['暂停','pause'],['停止','stop']])individual.append(button(text,'account-action',{accountId:id,action}));
  const commandResult=element('p','command-result');commandResult.setAttribute('role','status');
@@ -62,6 +63,7 @@ function updateCard(card,a,state){
  if(signature!==card.tabSignature){card.tabSignature=signature;card.tabs.replaceChildren();for(const t of a.tabs){const row=element('div','page-row');row.append(button(t.kind+' · '+t.title,'show',t.id,'tab'+(t.id===state.active?' active':'')));const controls=element('div','page-actions');controls.append(button('重新加载','reload',t.id),button('助手菜单','menu',t.id),button('关闭','close',t.id,'danger'));row.append(controls);card.tabs.append(row);}}
 }
 window.client.onState(state=>{
+ updateOverview(state);
  collapseAllNext=state.accounts.some(a=>!a.collapsed);
  const toggleAll=document.getElementById('toggle-all');toggleAll.textContent=collapseAllNext?'全部收纳':'全部展开';toggleAll.setAttribute('aria-expanded',String(collapseAllNext));toggleAll.disabled=!state.accounts.length;
  const batch=state.batch;
@@ -76,4 +78,32 @@ window.client.onState(state=>{
  const playing=state.accounts.filter(a=>a.states.some(s=>s.status==='running'&&s.media?.paused===false&&Date.now()-s.media.at<20000)).length;
  document.getElementById('account-count').textContent=state.accounts.length+' 个账号 · '+running+' 任务 / '+playing+' 播放';
 });
+const overviewRows=new Map();let overviewState=null;
+document.getElementById('overview-filter').onchange=()=>overviewState&&updateOverview(overviewState);
+function updateOverview(state){
+ overviewState=state;const now=Date.now(),rows=state.accounts.map(a=>accountOverview(a,now)),totals=overviewTotals(rows);
+ document.getElementById('overview').hidden=Boolean(state.active);
+ document.getElementById('overview-button').setAttribute('aria-pressed',String(!state.active));
+ const metrics=document.getElementById('overview-metrics');
+ const values=[['账号',totals.accounts],['播放中',totals.playing],['需处理',totals.attention],['专题完成',totals.complete+'/'+totals.accounts],['专题已完成学时合计',totals.known?totals.hours+' / '+totals.total:'—']];
+ const signature=JSON.stringify(values);if(metrics.dataset.signature!==signature){metrics.dataset.signature=signature;metrics.replaceChildren();for(const [label,value]of values){const card=element('div','metric');card.append(element('span','',label),element('strong','',String(value)));metrics.append(card);}}
+ metrics.title='学时合计覆盖 '+totals.known+'/'+totals.accounts+' 个账号；同一专题在不同账号分别计入，不是个人年度累计。';
+ document.getElementById('overview-time').textContent='面板更新 '+new Date(now).toLocaleTimeString('zh-CN');
+ const rescueFresh=state.rescue&&now-state.rescue.at<45000;
+ document.getElementById('overview-health').textContent='接管：'+(!rescueFresh?'心跳待确认':state.rescue.status==='watching'?'监听中':state.rescue.status==='disabled'?'已关闭':'处理中 / 需检查')+' · Bark '+(state.barkEnabled?'已配置':'未配置')+' · 学时覆盖 '+totals.known+'/'+totals.accounts;
+ const body=document.querySelector('#overview-table tbody'),filter=document.getElementById('overview-filter').value,live=new Set(rows.map(r=>r.id));let visible=0;
+ for(const [id,row]of overviewRows)if(!live.has(id)){row.tr.remove();overviewRows.delete(id);}
+ for(const r of rows){
+  let row=overviewRows.get(r.id);if(!row){const tr=element('tr','');tr.dataset.accountId=r.id;const cells=Array.from({length:7},()=>element('td',''));tr.append(...cells);cells[6].append(button('播放','player',r.id),button('专题','home',r.id));body.append(tr);row={tr,cells};overviewRows.set(r.id,row);}
+  row.tr.hidden=filter==='attention'?!r.attention:filter==='incomplete'?r.topic?.allCompleted===true:false;if(!row.tr.hidden)visible++;
+  row.tr.classList.toggle('attention-row',r.attention);const c=row.cells,t=r.topic;
+  c[0].replaceChildren(element('strong','',r.name),element('span','table-sub',r.status));
+  c[1].textContent=r.home&&Number.isFinite(r.home.hours)?String(r.home.hours):'— 未读取';c[1].title=r.home?'首页采集：'+new Date(r.home.at).toLocaleString('zh-CN'):'进入首页采集后显示，当前不自动跳转以免打断播放';
+  c[2].textContent=t?.completedHours!=null?t.completedHours+' / '+t.totalHours:'— 未完整读取';c[2].title='当前专题已完成课程的标注学时 / 总学时';
+  c[3].replaceChildren(element('strong','',t?t.completed+' / '+t.total:'—'),element('span','table-sub',t?.title||'专题未读取'));if(t&&!t.verificationComplete)c[3].append(element('span','table-sub','列表尚未完整核验'));
+  c[4].replaceChildren(element('span','table-course',r.lesson||'课程未读取'),element('span','table-sub',Number.isFinite(r.progress)?'服务器 '+r.progress+'%':'进度未读取'));
+  c[5].textContent=t?new Date(t.at).toLocaleTimeString('zh-CN')+(r.stale?' · 待更新':''):'—';c[5].classList.toggle('stale',r.stale);
+ }
+ document.getElementById('overview-empty').hidden=visible>0;
+}
 window.client.command('state');
