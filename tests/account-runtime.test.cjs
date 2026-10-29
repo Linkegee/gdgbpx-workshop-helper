@@ -1,11 +1,14 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {randomUUID,createHash}=require('node:crypto');
-const {createAccountRuntime,migratePreferences}=require('../src/account-context.cjs');
+const {createAccountRuntime,migratePreferences,bindPlayerStage}=require('../src/account-context.cjs');
 const {createAccountStorage}=require('../src/account-storage.cjs');
 const {createSessionRequest}=require('../src/session-request.cjs');
 const STATE='gdgbpx_workshop_helper_state_v1';
+const stageMessages=new WeakMap();
 function fixture(values=new Map()) {
+    if(!stageMessages.has(values)) stageMessages.set(values,new Map());
+    const messages=stageMessages.get(values);
     let tab={},marker=randomUUID(),uid='';
     const api={
         GM_getTab:fn=>fn(structuredClone(tab)),GM_saveTab:value=>{tab=structuredClone(value);},
@@ -14,11 +17,60 @@ function fixture(values=new Map()) {
     };
     const env={href:()=> 'https://gbpx.gd.gov.cn/gdceportal/dist/',isMain:true,isTop:true,isPlayer:false,
         uuid:randomUUID,now:()=>1000,sessionMarker:()=>marker,routeUid:()=>uid,
+        publishStage(id,target,allowed){messages.set(id,{target,allowed});return ()=>messages.delete(id);},
+        async receiveStage(id){const value=messages.get(id);if(!value?.allowed())throw new Error('source blocked');return value.target;},
         digest:async value=>createHash('sha256').update(value).digest('hex'),
         setTimeout(fn,ms){if(ms===100)queueMicrotask(fn);return 1;},clearTimeout(){}};
     return {api,env,values,setMarker:value=>{marker=value;},setUid:value=>{uid=value;}};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('pre-bound player retains the correct account when the verification page redirects before scripts run',async()=>{
+    const values=new Map(),a=fixture(values),b=fixture(values),pa=fixture(values),pb=fixture(values);
+    a.setUid('user-a');b.setUid('user-b');
+    const ar=await createAccountRuntime(a.api,a.env),br=await createAccountRuntime(b.api,b.env);
+    const stageA=ar.playerStage('https://cs1.gdgbpx.com/verify?t=secret-a');
+    const stageB=br.playerStage('https://cs1.gdgbpx.com/verify?t=secret-b');
+    assert.ok(!stageA.includes('secret-a'));
+    assert.ok(!JSON.stringify([...values]).includes('secret-a'),'authorization must never enter persistent userscript storage');
+    const jumpA=await bindPlayerStage(pa.api,{...pa.env,href:()=>stageA});
+    const jumpB=await bindPlayerStage(pb.api,{...pb.env,href:()=>stageB});
+    assert.ok(!JSON.stringify([...values]).includes('secret-a'));
+    assert.ok(!JSON.stringify([...values]).includes('secret-b'));
+    assert.equal(new URL(jumpA).searchParams.get('t'),'secret-a');
+    assert.equal(new URL(jumpB).searchParams.get('t'),'secret-b');
+    const redirected='https://cs1.gdgbpx.com/player';
+    const ap=await createAccountRuntime(pa.api,{...pa.env,isMain:false,isPlayer:true,href:()=>redirected});
+    const bp=await createAccountRuntime(pb.api,{...pb.env,isMain:false,isPlayer:true,href:()=>redirected});
+    assert.equal(ap.id,ar.id);assert.equal(bp.id,br.id);assert.notEqual(ap.id,bp.id);
+    await assert.rejects(bindPlayerStage(pa.api,{...pa.env,href:()=>stageA}),/失效/);
+});
+
+test('staged player rejects expired tickets and an already bound different account',async()=>{
+    const values=new Map(),a=fixture(values),other=fixture(values);
+    const ar=await createAccountRuntime(a.api,a.env);
+    await createAccountRuntime(other.api,other.env);
+    const stage=ar.playerStage('https://cs1.gdgbpx.com/verify?t=secret');
+    await assert.rejects(bindPlayerStage(other.api,{...other.env,href:()=>stage,stageMarker:()=> 'wrong-marker'}),/会话不匹配/);
+    await assert.rejects(bindPlayerStage(other.api,{...other.env,href:()=>stage}),/归属冲突/);
+    await assert.rejects(bindPlayerStage(fixture(values).api,{...a.env,href:()=>stage,now:()=>200000}),/失效/);
+    assert.throws(()=>ar.playerStage('https://example.com/verify'),/域名/);
+});
+
+test('staging waits for saved metadata and fails closed if saving never succeeds',async()=>{
+    const values=new Map(),main=fixture(values),player=fixture(values);
+    const r=await createAccountRuntime(main.api,main.env);
+    const url=r.playerStage('https://cs1.gdgbpx.com/verify?t=memory-only');
+    let reads=0,pending;
+    const delayed={...player.api,GM_saveTab:value=>{pending=value;},GM_getTab:fn=>{
+        reads++;if(reads===4)player.api.GM_saveTab(pending);player.api.GM_getTab(fn);
+    }};
+    await bindPlayerStage(delayed,{...player.env,href:()=>url});
+    assert.ok(reads>=4);
+    const failUrl=r.playerStage('https://cs1.gdgbpx.com/verify');
+    const empty=fixture(values);
+    await assert.rejects(bindPlayerStage({...empty.api,GM_saveTab(){}},{...empty.env,href:()=>failUrl}),/身份保存失败/);
+});
 
 test('repeated rejected starts do not extend a historical authorization conflict',async()=>{
     const values=new Map(),a=fixture(values),b=fixture(values);

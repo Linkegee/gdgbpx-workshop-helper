@@ -2,14 +2,15 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const crypto=require('node:crypto').webcrypto;
+const {BroadcastChannel}=require('node:worker_threads');
 const source=fs.readFileSync(path.join(__dirname,'../gdgbpx-workshop-helper.user.js'),'utf8');
 const STATE='gdgbpx_workshop_helper_state_v1';
 function tabState() {return {metadata:{},local:new Map(),session:new Map()};}
 async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?classType=3',documentOverrides={},expectFailure=false) {
-    const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,Blob,
+    const url=new URL(href),context={URL,URLSearchParams,crypto,TextEncoder,Uint8Array,Event,AbortController,Blob,BroadcastChannel,
         navigator:{userAgent:'test-firefox',onLine:true},
         setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},
-        location:{href,hostname:url.hostname,hash:url.hash,assign(value){context.assigned=value;}},
+        location:{href,hostname:url.hostname,hash:url.hash,assign(value){context.assigned=value;},replace(value){context.assigned=value;}},
         localStorage:{getItem:key=>tab.local.get(key)||null,setItem:(key,value)=>tab.local.set(key,value)},
         sessionStorage:{getItem:key=>tab.session.get(key)||null,setItem:(key,value)=>tab.session.set(key,value)},
         document:{readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},createElement(){throw new Error('Bundle bootstrap failed');}},
@@ -28,6 +29,20 @@ async function boot(values,tab,href='https://gbpx.gd.gov.cn/gdceportal/dist/#/wo
     if (!expectFailure) assert.ok(context.testApi,'full userscript must bootstrap');
     return context;
 }
+
+test('full bundle binds the new tab before replacing the staging page and survives an unscripted redirect',async()=>{
+    const values=new Map(),mainTab=tabState(),newTab=tabState();
+    const main=await boot(values,mainTab);
+    newTab.local=mainTab.local;
+    const url=main.testApi.accountRuntime.playerStage('https://cs1.gdgbpx.com/verify?t=synthetic-private');
+    assert.ok(!JSON.stringify([...values]).includes('synthetic-private'));
+    const stage=await boot(values,newTab,url,{},true);
+    assert.equal(stage.assigned,'https://cs1.gdgbpx.com/verify?t=synthetic-private');
+    assert.equal(stage.testApi,undefined,'staging must not initialize another main-page helper');
+    const player=await boot(values,newTab,'https://cs1.gdgbpx.com/player');
+    assert.equal(player.testApi.accountRuntime.id,main.testApi.accountRuntime.id);
+    assert.ok(player.testApi.diagnosticBundle().logs.some(log=>log.event==='tab-lookup-ready' && log.detail.stageBound));
+});
 test('published bundle: four main pages and four players retain separate states, stop and reload',async()=>{
     const values=new Map([[STATE,{status:'running',currentLessonKey:'legacy-course'}]]),mains=[];
     for(let i=0;i<4;i++) {
@@ -62,7 +77,7 @@ test('start on homepage uses native identity entry; update identity and version 
     assert.equal(context.assigned,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');
     assert.match(source,/\/\/ @name\s+广东省干部培训网络学院专题学习助手\r?\n/);
     assert.match(source,/\/\/ @namespace\s+https:\/\/gbpx.gd.gov.cn\/\r?\n/);
-    assert.match(source,/@version\s+1\.5\.56/);
+    assert.match(source,/@version\s+1\.5\.57/);
     assert.match(source,/@updateURL\s+https:\/\/raw.githubusercontent.com\/Linkegee\/gdgbpx-workshop-helper\/main\/gdgbpx-workshop-helper.user.js/);
     assert.match(source, /@grant\s+window\.close/);
     assert.ok(source.includes('component?.$$Request?.course_auth'),'bundling preserves literal dollar signs');

@@ -22,6 +22,14 @@
     const ready = () => document.readyState === 'loading'
         ? new Promise(resolve => document.addEventListener('DOMContentLoaded',resolve,{once:true})) : Promise.resolve();
     try {
+        const launchChannel=createLaunchChannel({Channel:page.BroadcastChannel,setTimeout,clearTimeout});
+        if(isMain && window.top===window && new URLSearchParams(location.hash.slice(1)).has('gbpx_stage')) {
+            await ready();
+            const target=await bindPlayerStage(native,{href:()=>location.href,now:()=>Date.now(),setTimeout,clearTimeout,
+                stageMarker:()=>page.localStorage.getItem('gdgbpxSessionMarkerV2'),receiveStage:id=>launchChannel.receive(id)});
+            location.replace(target);
+            return;
+        }
         // MultiLogin must have installed its page storage proxy before we bind a main tab.
         if (isMain) await ready();
         const accountRuntime = await createAccountRuntime(native, {
@@ -29,6 +37,7 @@
             href:()=>location.href,isMain,isTop:window.top===window,
             isPlayer:['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(location.hostname),
             now:()=>Date.now(),uuid:()=>crypto.randomUUID(),setTimeout,clearTimeout,
+            publishStage:(id,target,allowed)=>launchChannel.publish(id,target,allowed),
             saveLaunch(value) {
                 try {
                     page.sessionStorage.setItem('gdgbpxLaunchRelayV2',JSON.stringify(value));

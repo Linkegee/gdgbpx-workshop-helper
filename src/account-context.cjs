@@ -13,6 +13,38 @@ function retireScope(api, scope, now, message) {
     });
 }
 
+async function bindPlayerStage(api, env) {
+    const entry=new URL(env.href());
+    const id=new URLSearchParams(entry.hash.slice(1)).get('gbpx_stage');
+    if(entry.origin!=='https://gbpx.gd.gov.cn' || entry.pathname!=='/gdceportal/index.aspx' || !/^[a-f0-9-]{36}$/.test(id||'')) throw new Error('无效的播放器启动页');
+    const key='gdgbpxPlayerStageV1:'+id;
+    const ticket=api.GM_getValue(key,null);
+    if(!ticket || ticket.expiresAt<env.now() || !validScope(ticket.scope)) throw new Error('播放器启动页已失效');
+    if(env.stageMarker && env.stageMarker()!==ticket.scope.marker) throw new Error('播放器启动页会话不匹配，请从对应账号专题页重新开始');
+    const target=new URL(await env.receiveStage(id));
+    if(target.protocol!=='https:' || !['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(target.hostname)
+        ||target.origin!==ticket.origin || target.pathname!==ticket.path) throw new Error('播放器域名未获支持');
+    if(ticket.expiresAt<=env.now()) throw new Error('播放器启动页已失效');
+    if(env.stageMarker && env.stageMarker()!==ticket.scope.marker) throw new Error('播放器启动页会话已变化');
+    if(api.GM_getValue(scopeKey(ticket.scope,STATE_NAME),null)?.phase==='account-context-changed') throw new Error('启动账号会话已失效');
+    const getTab=()=>new Promise((resolve,reject)=>{
+        const timer=env.setTimeout(()=>reject(new Error('读取标签页身份超时')),5000);
+        api.GM_getTab(value=>{env.clearTimeout(timer);resolve(value||{});});
+    });
+    const tab=await getTab();
+    if(validScope(tab[TAB_SLOT]) && tab[TAB_SLOT].id!==ticket.scope.id) throw new Error('播放器归属冲突');
+    tab[TAB_SLOT]=ticket.scope;tab.gdgbpxStageBoundAt=env.now();api.GM_saveTab(tab);
+    let confirmed=false;
+    for(let attempt=0;attempt<20;attempt++) {
+        const saved=await getTab();
+        if(saved[TAB_SLOT]?.id===ticket.scope.id) {confirmed=true;break;}
+        await new Promise(resolve=>env.setTimeout(resolve,100));
+    }
+    if(!confirmed) throw new Error('播放器身份保存失败');
+    api.GM_deleteValue(key);
+    return target.href;
+}
+
 async function createAccountRuntime(api, env) {
     const trace = (event, detail = {}) => { try { env.onDiagnostic?.(event, detail); } catch (_) {} };
     trace('runtime-entry', {main:env.isMain,top:env.isTop,player:env.isPlayer});
@@ -34,7 +66,7 @@ async function createAccountRuntime(api, env) {
     });
     trace('tab-lookup-start');
     let tab = await getTab();
-    trace('tab-lookup-ready', {scopePresent:validScope(tab[TAB_SLOT]), directLaunchPresent:Boolean(directLaunch), relayPresent:Boolean(relay)});
+    trace('tab-lookup-ready', {scopePresent:validScope(tab[TAB_SLOT]),stageBound:Boolean(tab.gdgbpxStageBoundAt), directLaunchPresent:Boolean(directLaunch), relayPresent:Boolean(relay)});
     const url = new URL(env.href());
     const launch = directLaunch || relay?.launch;
     if (env.isPlayer && launch && !validScope(tab[TAB_SLOT])) {
@@ -187,10 +219,21 @@ async function createAccountRuntime(api, env) {
         env.setTimeout(()=>api.GM_deleteValue('gdgbpxLaunchV2:'+ticket),120000);
         return player.href;
     }
+    function playerStage(target) {
+        if (!guard()) throw new Error('账号会话尚未核验');
+        const player=new URL(target);
+        if(player.protocol!=='https:' || !['wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(player.hostname)) throw new Error('播放器域名未获支持');
+        const id=env.uuid(),key='gdgbpxPlayerStageV1:'+id;
+        const close=env.publishStage(id,player.href,guard);
+        api.GM_setValue(key,{scope,origin:player.origin,path:player.pathname,expiresAt:env.now()+120000});
+        env.setTimeout(()=>{close();api.GM_deleteValue(key);},120000);
+        trace('player-stage-created',{targetOrigin:player.origin,targetPath:player.pathname});
+        return 'https://gbpx.gd.gov.cn/gdceportal/index.aspx#gbpx_stage='+id;
+    }
     return Object.freeze({id:scope.id,label:scope.id.slice(0,6),guard,invalidate,hasIdentity:()=>Boolean(scope.ownerFingerprint),
         diagnostics:()=>({accountScope:scope.id,identityKnown:Boolean(scope.ownerFingerprint),
             blocked,blockedReason,identityCheckPending:pending,courseCheckPending:authPending,
-            courseChecked:Boolean(checkedAuth),ownershipEvidence:ownershipEvidence && {...ownershipEvidence},directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,bridgeEnabled:false});
+            courseChecked:Boolean(checkedAuth),ownershipEvidence:ownershipEvidence && {...ownershipEvidence},directLaunchPresent:Boolean(directLaunch),relayPresent:Boolean(relay)}),checkCourseAuth,playerUrl,playerStage,bridgeEnabled:false});
 }
 
 function migratePreferences(api, storage) {
@@ -212,4 +255,4 @@ function migratePreferences(api, storage) {
     }
     storage.GM_setValue('gdgbpxMigrationV2',true);
 }
-module.exports = {createAccountRuntime,migratePreferences,retireScope};
+module.exports = {createAccountRuntime,migratePreferences,retireScope,bindPlayerStage};

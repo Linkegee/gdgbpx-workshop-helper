@@ -2268,7 +2268,7 @@
                 return false;
             }
             if (!accountRuntime.checkCourseAuth(new URL(target.url).searchParams.get('t'))) return false;
-            const tab = GM_openInTab(accountRuntime.playerUrl(target.url), {
+            const tab = GM_openInTab(accountRuntime.playerStage(target.url), {
                 // Automatic lesson handoffs must not select the new player tab.
                 active: false,
                 insert: true,

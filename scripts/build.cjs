@@ -9,7 +9,7 @@ function withVersion(name) {
     if(source.split(marker).length!==2)throw new Error('Expected one version marker in '+name);
     return source.replace(marker,()=>JSON.stringify(version));
 }
-const modules=['account-storage.cjs','account-context.cjs','session-request.cjs','progress-notifier.cjs']
+const modules=['account-storage.cjs','account-context.cjs','session-request.cjs','progress-notifier.cjs','launch-channel.cjs']
     .map(name=>read(name).replace(/^module.exports\s*=.*$/gm,'')).join('\n');
 const body=withVersion('bootstrap.js').replace('/* ACCOUNT_MODULES */',()=>modules)
     .replace('/* HELPER_CORE */',()=>'// BEGIN HELPER CORE\n'+withVersion('helper.js')+'// END HELPER CORE');
