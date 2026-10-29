@@ -1,10 +1,18 @@
 'use strict';
-const {ipcRenderer}=require('electron');
+const {ipcRenderer,contextBridge}=require('electron');
 if(['gbpx.gd.gov.cn','wcs1.shawcoder.xyz','cs1.gdgbpx.com'].includes(location.hostname) && location.protocol==='https:') {
 // Tampermonkey supplies callable timer wrappers. Native browser timers require
 // their Window receiver when the helper passes them through environment objects.
 const setTimeout=(...args)=>window.setTimeout(...args),clearTimeout=id=>window.clearTimeout(id);
 const setInterval=(...args)=>window.setInterval(...args),clearInterval=id=>window.clearInterval(id);
+const clientReadCourseContext=(rootDocument,title='')=>{
+  let frameIndex=-1;
+  if(rootDocument!==document){
+    frameIndex=Array.from(document.querySelectorAll('iframe')).findIndex(frame=>{try{return frame.contentDocument===rootDocument;}catch{return false;}});
+    if(frameIndex<0)return null;
+  }
+  try{return contextBridge.executeInMainWorld({func:readCourseContextInPage,args:[{frameIndex,title:String(title)}]});}catch{return null;}
+};
 const call=(op,...args)=>ipcRenderer.sendSync('helper',op,args);
 const GM_getValue=(key,fallback)=>{const r=call('get',key);return r?.found?r.value:fallback;};
 const GM_setValue=(key,value)=>call('set',key,value);

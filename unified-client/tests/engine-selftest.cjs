@@ -28,12 +28,32 @@ module.exports=async({accounts,configure,open,pages,store,app})=>{
     assert.ok(ascope);assert.ok(bscope);assert.notEqual(ascope.id,bscope.id);
     assert.ok(Object.keys(store(a.id)).some(k=>k.includes(ascope.id)));
     assert.ok(!JSON.stringify(store(b.id)).includes(ascope.id));
-    const player=open(a.id,'https://cs1.gdgbpx.com/fixture',aid,false);
+    // Reproduce the real failure: Vue puts course authorization on a page-world
+    // DOM expando; an isolated preload cannot see that __vue__ property.
+    for(const [wc,item] of [[aw,a],[bw,b]]){
+      await wc.executeJavaScript(`(()=>{
+        const fixture=document.createElement('div');fixture.id='pane-required';
+        fixture.innerHTML='<div class="item_box"><span class="item_title">Synthetic course</span><span class="item_status">未完成</span><div role="progressbar" aria-valuenow="0"></div></div>';
+        document.body.append(fixture);
+        fixture.__vue__={info:{playDomain:'https://cs1.gdgbpx.com/verify'},$$Request:{course_auth:${JSON.stringify('synthetic-auth-'+item.id)}},listNav:{requiredCourseList:{listInfo:[{courseName:'Synthetic course',resourceCode:'synthetic-resource',courseId:'synthetic-course'}]}}};
+        location.hash='#/workshop/workshopindex/mergeClass?classId=synthetic';
+        document.querySelector('[data-action="start"]').click();
+      })()`);
+      await until(()=>Object.keys(store(item.id)).some(k=>k.startsWith('gdgbpxCourseOwnerV1:'))||Object.values(store(item.id)).some(v=>v?.phase==='account-context-changed'));
+      assert.ok(Object.keys(store(item.id)).some(k=>k.startsWith('gdgbpxCourseOwnerV1:')),'page-world Vue authorization must reach helper without stopping the account');
+    }
+    await until(()=>[...pages.values()].some(p=>p.parent===aid)&&[...pages.values()].some(p=>p.parent===bid));
+    const player=[...pages.entries()].find(([,p])=>p.parent===aid)[0];
+    await until(()=>pages.get(player).metadata.gdgbpxStageBoundAt);
+    assert.equal(pages.get(player).metadata.gdgbpxScopeV2.id,ascope.id);
+    await until(()=>pages.get(player).view.webContents.getURL().startsWith('https://cs1.gdgbpx.com/verify?'));
+    assert.equal(new URL(pages.get(player).view.webContents.getURL()).searchParams.get('t'),'synthetic-auth-'+a.id);
+    assert.equal(new URL(pages.get(player).view.webContents.getURL()).searchParams.get('courseId'),'synthetic-resource');
     assert.equal(pages.get(player).view.webContents.session,aw.session);
     assert.notEqual(pages.get(player).view.webContents.session,bw.session);
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: separate cookies/storage, helper preload, distinct scopes, sandbox, popup inheritance, duplicate limit, reload');
+    console.log('ENGINE PASS: separate cookies/storage, helper preload, distinct scopes, sandbox, page-world Vue authorization, managed launch, popup inheritance, duplicate limit, reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };
