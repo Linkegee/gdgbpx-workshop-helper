@@ -9,8 +9,8 @@ function partition(id) {
   return 'persist:gdgbpx-'+id;
 }
 function account(name) {return {id:randomUUID(),name:String(name||'新账号').slice(0,40)};}
-function summarize(values) {
-  return Object.entries(values).filter(([key])=>key.endsWith(':gdgbpx_workshop_helper_state_v1'))
+function summarize(values,scopes=null) {
+  return Object.entries(values).filter(([key])=>key.endsWith(':gdgbpx_workshop_helper_state_v1')&&(!scopes||scopes.has(key.split(':')[1])))
     .map(([,s])=>({status:s.status,phase:s.phase,message:String(s.message||'').slice(0,220),
       lesson:String(s.currentLessonTitle||'').slice(0,120),progress:s.currentLessonProgress}));
 }

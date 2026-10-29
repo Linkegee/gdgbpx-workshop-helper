@@ -7,7 +7,7 @@ module.exports=async({accounts,configure,open,pages,store,app})=>{
     const a=account('synthetic A'),b=account('synthetic B');accounts.push(a,b);
     for(const item of [a,b]){
       const ses=configure(item.id);
-      ses.protocol.handle('https',()=>new Response('<!doctype html><title>Synthetic test</title><body>Fixture</body>',{headers:{'Content-Type':'text/html'}}));
+      ses.protocol.handle('https',request=>new Response(new URL(request.url).pathname.endsWith('playmp4_pc.html')?'<html><title>Synthetic course</title><body><h3>Synthetic course</h3><video></video></body></html>':'<!doctype html><title>Synthetic test</title><body>Fixture</body>',{headers:{'Content-Type':'text/html'}}));
       await ses.cookies.set({url:'https://gbpx.gd.gov.cn',name:'fixture_identity',value:item.name,secure:true});
     }
     const aid=open(a.id,'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?uid=synthetic-a');
@@ -51,9 +51,24 @@ module.exports=async({accounts,configure,open,pages,store,app})=>{
     assert.equal(new URL(pages.get(player).view.webContents.getURL()).searchParams.get('courseId'),'synthetic-resource');
     assert.equal(pages.get(player).view.webContents.session,aw.session);
     assert.notEqual(pages.get(player).view.webContents.session,bw.session);
+    const pw=pages.get(player).view.webContents;
+    await pw.executeJavaScript(`(()=>{const f=document.createElement('iframe');f.src='https://cs1.gdgbpx.com/gdcecw/play_pc/playmp4_pc.html';document.body.append(f);})()`);
+    await until(()=>Object.entries(store(a.id)).some(([key,v])=>key.endsWith(':gdgbpx_workshop_helper_media_heartbeat_v2')&&v?.paused!==null));
+    const frame=pw.mainFrame.frames.find(f=>f.url.endsWith('playmp4_pc.html'));
+    assert.ok(frame);
+    assert.equal(await frame.executeJavaScript('document.querySelector("video").muted'),true);
+    assert.equal(await frame.executeJavaScript('typeof window.require'),'undefined');
+    assert.ok(pages.get(player).view.getBounds().width>0,'background player must have a real viewport');
+    assert.equal(pw.isAudioMuted(),true,'player must be muted before media preload is ready');
+    await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
+    await until(()=>!pw.isAudioMuted());
+    const otherPlayer=[...pages.values()].find(p=>p.parent===bid).view.webContents;
+    assert.equal(otherPlayer.isAudioMuted(),true,'changing one account mute must not unmute another account');
+    await aw.executeJavaScript('document.getElementById("gbpx-muted").click()');
+    await until(()=>pw.isAudioMuted());
     assert.equal(open(a.id,'https://cs1.gdgbpx.com/second',aid,false),null);
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: separate cookies/storage, helper preload, distinct scopes, sandbox, page-world Vue authorization, managed launch, popup inheritance, duplicate limit, reload');
+    console.log('ENGINE PASS: separate cookies/storage, helper preload, distinct scopes, sandbox, Vue authorization, managed launch, nested media heartbeat and mute, viewport, duplicate limit, reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };

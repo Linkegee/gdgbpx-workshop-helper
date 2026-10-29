@@ -14,7 +14,14 @@ helper=helper.replace(playerMarker,playerMarker+`\n        const context=clientR
         clientUrl.searchParams.set('t',context.auth);clientUrl.searchParams.set('courseId',context.resourceCode);clientUrl.searchParams.set('courseLabel','wlxy');
         return {url:clientUrl.href,resourceCode:context.resourceCode,databaseCourseId:context.databaseCourseId,playDomain:clientUrl.origin+clientUrl.pathname};\n`);
 const reader=fs.readFileSync(path.join(base,'course-context.cjs'),'utf8').replace('module.exports={readCourseContextInPage};','');
+const media=fs.readFileSync(path.join(base,'media-context.cjs'),'utf8').replace('module.exports={findClientVideo,clientPlayerDocument};','');
+if(helper.split("document.querySelector('video')").length!==4)throw new Error('Video adapter seam changed');
+helper=helper.replaceAll("document.querySelector('video')",'findClientVideo()');
+for(const marker of ['function detectVisiblePlayerLessonTitle(state = getState()) {','function hasBlockingQuestion() {','function dismissKnownContinuePrompt() {','function playerTick() {']){
+  if(helper.split(marker).length!==2)throw new Error('Player document seam changed');
+  helper=helper.replace(marker,marker+'\n        const document=clientPlayerDocument();\n');
+}
 // The helper runs inside the sandboxed, isolated preload world. No IPC bridge
 // or Node object is exposed to the remote page's JavaScript world.
-fs.writeFileSync(path.join(base,'generated','page.cjs'),adapter+'\n'+reader+'\n'+helper+'\n}\n');
+fs.writeFileSync(path.join(base,'generated','page.cjs'),adapter+'\n'+reader+'\n'+media+'\n'+helper+'\n}\n');
 console.log('Bundled helper '+helper.match(/@version\s+(\S+)/)[1]);

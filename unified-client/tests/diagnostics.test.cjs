@@ -1,0 +1,4 @@
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const {clean,report}=require('../diagnostics.cjs');
+test('local diagnostics omit auth, Cookie and query credentials',()=>{const value=clean({auth:'SECRET_AUTH',cookie:'SECRET_COOKIE',url:'https://gbpx.gd.gov.cn/path?t=SECRET_QUERY#SECRET_FRAGMENT',nested:{device_key:'SECRET_BARK'}});assert.ok(!JSON.stringify(value).includes('SECRET'));assert.equal(value.url,'https://gbpx.gd.gov.cn/path');});
+test('report omits raw store values and scopes not attached to live pages',()=>{const stores=new Map([['account',{bark:'SECRET',unrelated:'SECRET', 'gdgbpx_account_v1:old:gdgbpx_workshop_helper_state_v1':{message:'OLD_SECRET'}}]]);const value=report('test',[{id:'account',name:'A'}],new Map(),stores);assert.ok(!JSON.stringify(value).includes('SECRET'));assert.equal(value.accounts[0].scopes.length,0);});
