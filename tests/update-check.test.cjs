@@ -3,10 +3,10 @@ const assert=require('node:assert/strict');
 const vm=require('node:vm');
 const {loadCore,runtimeStub}=require('./load-core.cjs');
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
-function boot(metadataResponse) {
+function boot(metadataResponse, notifier) {
     let now=1800000000000,nextId=0;
     const tasks=new Map(),values=new Map(),requests=[],metadataRequests=[];
-    const context={accountRuntime:runtimeStub,progressNotifier:{tick(){},configure(){}},URL,URLSearchParams,
+    const context={accountRuntime:runtimeStub,progressNotifier:notifier||{tick(){},configure(){}},URL,URLSearchParams,
         Date:class extends Date {static now(){return now;}},
         setTimeout(fn,delay){const id=++nextId;tasks.set(id,{fn,at:now+delay});return id;},
         clearTimeout:id=>tasks.delete(id),
@@ -26,7 +26,7 @@ function boot(metadataResponse) {
     };
     context.window=context;context.top=context;
     vm.runInNewContext(loadCore().replace('    installGlobalErrorLogging();',
-        `    globalThis.api={checkForScriptUpdate,getAvailableUpdate,handlePanelAction,setPanel(value){panel=value;},
+        `    globalThis.api={checkForScriptUpdate,getAvailableUpdate,handlePanelAction,setPanel(value){panel=value;},setDownload(fn){downloadLogs=fn;},
          init(){installPanel=()=>{};installMenuSectionTracking=()=>{};initMainPage();}};return;
          installGlobalErrorLogging();`),context);
     async function advance(ms) {
@@ -109,4 +109,15 @@ test('failed or malformed fallback never claims success and allows manual retry'
         assert.equal(h.metadataRequests.length,2);
         assert.equal(h.requests.length,2);
     }
+});
+
+test('automatic incident callback stores evidence without invoking browser download',async()=>{
+ let downloads=0,callback;
+ const h=boot(undefined,{tick(state,onIncident){callback=onIncident;}});
+ h.api.setDownload(()=>downloads++);h.api.init();await h.advance(30000);
+ callback('player-open-failed');callback('progress-stalled');
+ assert.equal(downloads,0,'automatic monitoring must not open Save As dialogs');
+ const incident=h.values.get('gdgbpx_automatic_incident_v1');
+ assert.equal(incident.reason,'progress-stalled');
+ assert.ok(incident.snapshot);assert.ok(incident.recentLogs.length<=30);
 });

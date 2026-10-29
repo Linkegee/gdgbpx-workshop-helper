@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         广东省干部培训网络学院专题学习助手
 // @namespace    https://gbpx.gd.gov.cn/
-// @version      1.5.52
+// @version      1.5.54
 // @description  用户手动启动后，依次处理“专题学习-在学”课程；支持系统维护检测与开放后恢复、暂停、停止、跳过和正常时长学习。
 // @author       User & Codex
 // @license      MIT
@@ -322,7 +322,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         api.GM_setValue(key,now);
         send(config,'学院助手 Bark 测试','这是你手动发送的测试通知。收到表示浏览器到手机的 Bark 推送链路可用；不会暂停课程或改变进度提醒计时。',finish);
     }
-    function tick(state,onIncident=()=>{}) {
+    function tick(state,onIncident=()=>{},heartbeat=null) {
         const config=api.GM_getValue(configKey,null);
         if(!config || !/^[A-Za-z0-9_-]+$/.test(config.key||''))return;
         const now=clock(), minutes=Math.max(3,Math.min(120,Number(config.minutes)||10));
@@ -353,18 +353,26 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         if(state.status!=='running' || state.maintenance) {api.GM_deleteValue(ledgerKey);return;}
         const lesson=state.currentLessonKey || 'phase:'+(state.phase||'unknown');
         const previous=api.GM_getValue(ledgerKey,null), progress=Number(state.currentLessonProgress)||0;
+        const fresh=heartbeat?.lessonKey===state.currentLessonKey&&heartbeat?.sessionId
+            &&Number.isFinite(heartbeat.at)&&now-heartbeat.at>=0&&now-heartbeat.at<30000
+            &&heartbeat.mediaFresh===true&&Number.isFinite(heartbeat.currentTime);
+        const media=fresh?{session:heartbeat.sessionId,time:heartbeat.currentTime,at:now}:null;
+        const advancing=Boolean(media&&previous?.lesson===lesson&&previous?.media?.session===media.session
+            &&media.time>previous.media.time+0.1&&heartbeat.paused===false);
+        const playback=advancing?'视频时间有增长（对比上次观测）；不等于服务器已计入学时':fresh&&heartbeat.paused===true?'当前视频已暂停':'播放状态未确认，不能据此断定视频停滞';
         if(!previous || previous.lesson!==lesson || progress>previous.progress || now<previous.since) {
-            api.GM_setValue(ledgerKey,{lesson,progress,since:now,sent:false});return;
+            api.GM_setValue(ledgerKey,{lesson,progress,since:now,sent:false,media});return;
         }
+        api.GM_setValue(ledgerKey,{...previous,media});
         if(previous.sent || now-previous.since<minutes*60000)return;
         // Reserve before sending. Unknown deliveries must not create duplicate alerts.
-        const reserved={...previous,sent:true,result:'attempting',at:now};
+        const reserved={...previous,media,sent:true,result:'attempting',at:now};
         api.GM_setValue(ledgerKey,reserved);
-        try {onIncident('progress-stalled');}catch(_){}
+        try {onIncident('server-progress-unconfirmed');}catch(_){}
         const finish=result=>{const latest=api.GM_getValue(ledgerKey,null);if(latest?.at===now && latest?.lesson===reserved.lesson)api.GM_setValue(ledgerKey,{...latest,result});};
-        const detail=state.currentLessonKey?`课程：${state.currentLessonTitle||'未知'}\n服务器进度：${progress}%`:'课程：未知（尚未进入课程）';
-        send(config,'学院学习进度未更新',
-            `账号标识：${scope.slice(0,8)}\n${detail}\n已约 ${Math.floor((now-previous.since)/60000)} 分钟无进展。\n状态：${state.phase}；请查看学院页面或下载日志交给 Codex 排查。`,finish);
+        const detail=state.currentLessonKey?`课程：${state.currentLessonTitle||'未知'}\n助手最后记录的课程进度：${progress}%`:'课程：未知（尚未进入课程）';
+        send(config,'学院服务器进度待核实',
+            `账号标识：${scope.slice(0,8)}\n${detail}\n距助手上次记录到进度增长约 ${Math.floor((now-previous.since)/60000)} 分钟；后台检查可能延迟，不代表网站一直没有更新。\n${playback}。\n状态：${state.phase}；请查看学院页面或下载日志交给 Codex 排查。`,finish);
     }
     return {tick,test,configure(key,minutes=10){
         if(key && !/^[A-Za-z0-9_-]+$/.test(key))throw new Error('Bark key 格式无效');
@@ -454,7 +462,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
 (function () {
     'use strict';
 
-    const VERSION = "1.5.52";
+    const VERSION = "1.5.54";
     const PROBE_FALLBACK_KEY = 'gdgbpx_probe_use_main_page_v1';
     const MAINTENANCE_CHECK_MS = 30000;
     const MAINTENANCE_REQUEST_TIMEOUT_MS = 15000;
@@ -467,6 +475,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
     const FLIGHT_INTERVAL_MS = 15000;
     let lastFlightSampleAt = 0;
     const FAILURE_KEY = 'gdgbpx_last_failure_v2';
+    const AUTOMATIC_INCIDENT_KEY = 'gdgbpx_automatic_incident_v1';
     const diagnosticDocumentTag = typeof bootstrapDocumentTag === 'string' ? bootstrapDocumentTag : 'unavailable';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
@@ -1154,6 +1163,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
             pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
             interruption: readExitMarker()?.interruption || null,
             lastFailure: GM_getValue(FAILURE_KEY,null),
+            automaticIncident: GM_getValue(AUTOMATIC_INCIDENT_KEY,null),
             flightRecorder: readFlightRecorder(),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
@@ -1170,22 +1180,23 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         // Export must not replace the failure message or mutate the task state.
     }
 
-    function downloadLogs(automatic = false) {
+    function downloadLogs() {
         const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        const prefix=automatic?'gdgbpx-auto-incident':'gdgbpx-helper-log';
+        const prefix='gdgbpx-helper-log';
         link.download = `${prefix}-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         document.body.appendChild(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-        debugLog('info', 'logs-downloaded', { entries: getLogs().length,automatic });
+        debugLog('info', 'logs-downloaded', { entries: getLogs().length });
     }
 
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
+        GM_deleteValue(AUTOMATIC_INCIDENT_KEY);
         for (const role of ['main','player','media']) GM_deleteValue(FLIGHT_KEY + role);
         GM_deleteValue(PAGE_HEALTH_KEY);
         try { window.sessionStorage.removeItem(TAB_EXIT_MARKER_KEY); } catch (_) {}
@@ -1428,9 +1439,11 @@ function createProgressNotifier(api, scope, clock = Date.now) {
             alert(messages[result] || '测试结果未知');
         }));
         setInterval(() => progressNotifier.tick(getState(),reason=>{
-            debugLog('warn','automatic-incident-export-requested',{reason});
-            downloadLogs(true);
-        }),30000);
+            debugLog('warn','automatic-incident-recorded',{reason});
+            // Keep a bounded local snapshot. Background downloads can open modal Save As dialogs.
+            GM_setValue(AUTOMATIC_INCIDENT_KEY,{time:new Date().toISOString(),reason,
+                snapshot:diagnosticSnapshot(),recentLogs:getLogs().slice(-30).map(entry=>sanitizeLogValue(entry))});
+        },getPlayerHeartbeat()),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
             handlePlayerEvent(value);
@@ -4116,7 +4129,7 @@ function createProgressNotifier(api, scope, clock = Date.now) {
         const download=document.createElement('button');
         download.textContent='下载启动诊断';
         download.addEventListener('click',()=>{
-            const data={schemaVersion:2,scriptVersion:"1.5.52",generatedAt:new Date().toISOString(),
+            const data={schemaVersion:2,scriptVersion:"1.5.54",generatedAt:new Date().toISOString(),
                 context:'bootstrap-failure',documentTag:bootstrapDocumentTag,
                 userAgent:navigator.userAgent,trace:bootstrapTrace};
             const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));

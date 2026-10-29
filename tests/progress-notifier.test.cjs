@@ -38,3 +38,16 @@ test('exports an automatic incident once, without exporting for manual pause',()
  assert.deepEqual(events,['login-required']);
  const other=setup();other.n.tick({...failed,userPaused:true},reason=>events.push(reason));assert.deepEqual(events,['login-required']);
 });
+
+test('moving video with unchanged cached percent is reported as unverified server progress, not stalled playback',()=>{
+ const h=setup(),hb=(at,time)=>({lessonKey:'lesson',sessionId:'player',at,mediaFresh:true,paused:false,currentTime:time});
+ h.n.tick(state,()=>{},hb(1000000,10));h.advance(10);h.n.tick(state,()=>{},hb(1600000,610));
+ const message=JSON.parse(h.sent[0].data);
+ assert.match(message.title,/待核实/);assert.match(message.body,/视频时间有增长/);assert.doesNotMatch(message.body,/分钟无进展/);
+});
+test('stale or wrong-course heartbeat never confirms playback',()=>{
+ for(const hb of [{lessonKey:'other',at:1600000,mediaFresh:true,paused:false,currentTime:100},{lessonKey:'lesson',at:1000000,mediaFresh:true,paused:false,currentTime:100}]){
+  const h=setup();h.n.tick(state);h.advance(10);h.n.tick(state,()=>{},hb);
+  assert.match(JSON.parse(h.sent[0].data).body,/播放状态未确认/);
+ }
+});

@@ -14,6 +14,7 @@
     const FLIGHT_INTERVAL_MS = 15000;
     let lastFlightSampleAt = 0;
     const FAILURE_KEY = 'gdgbpx_last_failure_v2';
+    const AUTOMATIC_INCIDENT_KEY = 'gdgbpx_automatic_incident_v1';
     const diagnosticDocumentTag = typeof bootstrapDocumentTag === 'string' ? bootstrapDocumentTag : 'unavailable';
     const LOG_KEY = 'gdgbpx_workshop_helper_logs_v1';
     const UPDATE_CHECK_KEY = 'gdgbpx_workshop_helper_update_check_v1';
@@ -701,6 +702,7 @@
             pageHealth: GM_getValue(PAGE_HEALTH_KEY, null),
             interruption: readExitMarker()?.interruption || null,
             lastFailure: GM_getValue(FAILURE_KEY,null),
+            automaticIncident: GM_getValue(AUTOMATIC_INCIDENT_KEY,null),
             flightRecorder: readFlightRecorder(),
             logs: getLogs().map(entry=>sanitizeLogValue(entry))
         };
@@ -717,22 +719,23 @@
         // Export must not replace the failure message or mutate the task state.
     }
 
-    function downloadLogs(automatic = false) {
+    function downloadLogs() {
         const blob = new Blob([diagnosticText()], { type: 'application/json;charset=utf-8' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        const prefix=automatic?'gdgbpx-auto-incident':'gdgbpx-helper-log';
+        const prefix='gdgbpx-helper-log';
         link.download = `${prefix}-${accountRuntime.label}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
         document.body.appendChild(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-        debugLog('info', 'logs-downloaded', { entries: getLogs().length,automatic });
+        debugLog('info', 'logs-downloaded', { entries: getLogs().length });
     }
 
     function clearLogs() {
         GM_setValue(LOG_KEY, []);
         GM_deleteValue(FAILURE_KEY);
+        GM_deleteValue(AUTOMATIC_INCIDENT_KEY);
         for (const role of ['main','player','media']) GM_deleteValue(FLIGHT_KEY + role);
         GM_deleteValue(PAGE_HEALTH_KEY);
         try { window.sessionStorage.removeItem(TAB_EXIT_MARKER_KEY); } catch (_) {}
@@ -975,9 +978,11 @@
             alert(messages[result] || '测试结果未知');
         }));
         setInterval(() => progressNotifier.tick(getState(),reason=>{
-            debugLog('warn','automatic-incident-export-requested',{reason});
-            downloadLogs(true);
-        }),30000);
+            debugLog('warn','automatic-incident-recorded',{reason});
+            // Keep a bounded local snapshot. Background downloads can open modal Save As dialogs.
+            GM_setValue(AUTOMATIC_INCIDENT_KEY,{time:new Date().toISOString(),reason,
+                snapshot:diagnosticSnapshot(),recentLogs:getLogs().slice(-30).map(entry=>sanitizeLogValue(entry))});
+        },getPlayerHeartbeat()),30000);
 
         GM_addValueChangeListener(EVENT_KEY, (_name, _oldValue, value) => {
             handlePlayerEvent(value);
