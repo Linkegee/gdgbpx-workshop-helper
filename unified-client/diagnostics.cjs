@@ -12,7 +12,7 @@ function report(version,accounts,pages,stores){
     const tabs=[...pages.values()].filter(p=>p.accountId===a.id);
     const scopes=new Set(tabs.map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));
     const values=stores.get(a.id)||{};
-    return {id:a.id,name:a.name,learning:values.__clientLearning||null,tabs:tabs.map(p=>({id:p.view.webContents.id,kind:p.parent?'player':'main',title:p.title,issue:p.issue,
+    return {id:a.id,name:a.name,manualHold:values.__clientManualHold||null,learning:values.__clientLearning||null,tabs:tabs.map(p=>({id:p.view.webContents.id,kind:p.parent?'player':'main',title:p.title,issue:p.issue,
       url:p.view.webContents.getURL(),bounds:p.view.getBounds(),audioMuted:p.view.webContents.isAudioMuted(),
       frames:p.view.webContents.mainFrame.framesInSubtree.map(frame=>({url:frame.url}))})),scopes:[...scopes].map(id=>{
       const prefix='gdgbpx_account_v1:'+id+':';

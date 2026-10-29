@@ -127,8 +127,25 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     assert.equal(JSON.parse(fs.readFileSync(receipt,'utf8')).result,'dispatched-needs-verification');
     fs.writeFileSync(path.join(input,validRequest.id+'.json'),JSON.stringify(validRequest));processControl();
     assert.equal(JSON.parse(fs.readFileSync(receipt,'utf8')).result,'duplicate-not-replayed');
+    // Exercise the actual trusted panel -> main -> preload -> helper path.
+    await panel.executeJavaScript('document.getElementById("batch-pause").click()');
+    await until(()=>[a,b].every(item=>store(item.id).__clientManualHold?.action==='pause'));
+    await until(()=>[a,b].every(item=>Object.values(store(item.id)).some(v=>v?.status==='paused'&&v?.userPaused===true)));
+    await until(async()=>await panel.executeJavaScript('document.querySelector(".group-status").textContent.includes("2/2")'));
+    await panel.executeJavaScript('document.getElementById("batch-start").click()');
+    await until(()=>[a,b].every(item=>!store(item.id).__clientManualHold));
+    await until(()=>[a,b].every(item=>Object.values(store(item.id)).some(v=>v?.status==='running'&&v?.userPaused===false)));
+    await until(async()=>await panel.executeJavaScript('document.querySelector(".group-status").textContent.includes("已结束")'));
+    await panel.executeJavaScript('document.getElementById("batch-stop").click()');
+    await until(()=>[a,b].every(item=>store(item.id).__clientManualHold?.action==='stop'));
+    await until(()=>[a,b].every(item=>Object.values(store(item.id)).some(v=>v?.status==='stopped')));
+    await until(async()=>await panel.executeJavaScript('document.querySelector(".group-status").textContent.includes("2/2")'));
+    assert.equal(pages.has(aid),true,'bulk stop retains the account main page');assert.equal(pages.has(bid),true);
+    const heldRequest={id:require('node:crypto').randomUUID(),accountId:a.id,action:'reload-main',at:Date.now()};
+    fs.writeFileSync(path.join(input,heldRequest.id+'.json'),JSON.stringify(heldRequest));processControl();
+    assert.equal(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'control/results',heldRequest.id+'.json'),'utf8')).result,'operator-hold');
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
+    console.log('ENGINE PASS: bulk pause/resume/stop through real IPC; immediate persistent operator hold; recovery refused after stop; per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };

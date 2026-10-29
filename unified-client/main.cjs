@@ -7,6 +7,7 @@ const {recoveryDecision}=require('./recovery.cjs');
 const {randomUUID}=require('node:crypto');
 const {report}=require('./diagnostics.cjs');
 const {createStoreWriter}=require('./store-writer.cjs');
+const {createBatch}=require('./batch.cjs');
 const HOME='https://gbpx.gd.gov.cn/gdceportal/index.aspx';
 const SELF=path.join(__dirname,'shell.html');
 const selfTest=process.argv.includes('--self-test');
@@ -17,6 +18,12 @@ if(!primary){console.log('SECONDARY_BLOCKED');app.quit();}
 app.on('second-instance',()=>{if(win&&!win.isDestroyed()){if(win.isMinimized())win.restore();win.show();win.focus();}});
 let win,accounts=[],active='',diagnosticsTimer,blocker=null,closing=false,barkConfig=null,panelPreferences={};
 let controlLedger={seen:{},budgets:{}},targets={accounts:[]};const pendingControl=new Map(),resumeOnLoad=new Set();
+let worker=null;
+const operatorResults={};
+const batch=createBatch({ids:()=>accounts.map(a=>a.id),prepare:(id,action)=>{
+ const values=store(id);values.__clientManualHold=action==='start'?null:{action,at:Date.now()};
+ resumeOnLoad.delete(id);write('helper-'+id+'.json',values);
+},dispatch:operatorDispatch,changed:()=>update()});
 const pages=new Map(),stores=new Map(),configured=new Set(),alerts=new Map();
 function read(name,fallback){const file=path.join(app.getPath('userData'),name);return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,'')):fallback;}
 function write(name,value){const file=path.join(app.getPath('userData'),name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);}
@@ -24,7 +31,7 @@ const storeWriter=createStoreWriter({setTimeout,clearTimeout,write:id=>write('he
 function store(id){if(!stores.has(id))stores.set(id,read('helper-'+id+'.json',{}));return stores.get(id);}
 function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;alerts.set(key,Date.now());if(Notification.isSupported())new Notification({title:'学院统一客户端',body:message}).show();if(barkConfig&&!selfTest)session.defaultSession.fetch('https://api.day.app/push',{method:'POST',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_key:barkConfig.key,title:'学院客户端需要检查',body:message,group:'干部学院'}),signal:AbortSignal.timeout(15000)}).catch(()=>{});}
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
-function snapshot(){return {accounts:accounts.map(a=>({...a,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,barkEnabled:Boolean(barkConfig)};}
+function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',kind:p.parent?'播放器':'专题 / 首页'}))})),active,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
 function layout(){if(!win||win.isDestroyed())return;const {width,height}=win.getContentBounds();for(const p of pages.values()){const show=p.view.webContents.id===active;p.view.setBounds({x:300,y:68,width:Math.max(1,width-300),height:Math.max(1,height-68)});p.view.setVisible(show);}update();}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
@@ -75,6 +82,13 @@ ipcMain.on('helper',(event,op,args=[])=>{
       case 'set':case 'delete':{
         if(typeof key!=='string'||key.length>300)throw new Error('Invalid key');
         const old=values[key];if(op==='set')values[key]=value;else delete values[key];
+        if(op==='set'&&key.endsWith(':gdgbpx_workshop_helper_logs_v1')&&Array.isArray(value)){
+          const last=value.at(-1);if(last?.event==='panel-action'){
+            const action=last.detail?.action;
+            if(['start','continue'].includes(action))values.__clientManualHold=null;
+            if(['pause','stop'].includes(action))values.__clientManualHold={action,at:Date.now()};
+          }
+        }
         if(op==='set'&&key.endsWith(':gdgbpx_workshop_helper_state_v1'))muteForScope(p.accountId,key.split(':')[1],value?.settings?.muted);
         for(const target of pages.values())if(target.accountId===p.accountId)for(const frame of target.view.webContents.mainFrame.framesInSubtree){try{frame.send('helper-value',key,old,op==='set'?value:undefined,event.sender.id);}catch{}}
         storeWriter.schedule(p.accountId);update();event.returnValue=true;break;
@@ -102,7 +116,23 @@ ipcMain.handle('helper-request',async(event,request)=>{
 });
 function trustedPanel(event){return event.sender===win.webContents&&event.senderFrame===win.webContents.mainFrame;}
 function finishControl(request,result){write('control/results/'+request.id+'.json',{id:request.id,accountId:request.accountId,action:request.action,result,at:Date.now()});try{fs.unlinkSync(path.join(app.getPath('userData'),'control/inbox',request.id+'.json'));}catch{}}
-ipcMain.on('client-control-result',(event,id,result)=>{try{const p=sender(event),request=pendingControl.get(id);if(!request||request.accountId!==p.accountId)return;pendingControl.delete(id);finishControl(request,String(result));}catch{}});
+function operatorDispatch(accountId,action){
+ const p=[...pages.values()].find(p=>p.accountId===accountId&&!p.parent),state=p?store(accountId)['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1']:null;
+ const immediate=result=>{operatorResults[accountId]={action,result,at:Date.now()};update();return Promise.resolve(result);};
+ if(!p)return immediate('account-unavailable');
+ if(action==='start'&&state?.status==='running')return immediate('already-running');
+ if(action==='stop'&&state?.status==='stopped')return immediate('already-stopped');
+ if(action==='pause'&&state?.userPaused)return immediate('already-paused');
+ if(action==='start'&&store(accountId).__clientLearning?.workshops?.[state?.currentClassId]?.allCompleted)return immediate('already-complete');
+ if(action==='start'&&['login-required','account-context-changed','maintenance-login','identity-entry-failed'].includes(state?.phase))return immediate('login-required');
+ return new Promise(resolve=>{
+  const id=randomUUID(),done=result=>{operatorResults[accountId]={action,result,at:Date.now()};update();resolve(result);};
+  pendingControl.set(id,{id,accountId,operator:true,done});
+  p.view.webContents.send('client-control',{id,action:action==='start'&&state?.status==='paused'?'continue':action});
+  setTimeout(()=>{if(pendingControl.delete(id))done('delivery-unknown');},8000);
+ });
+}
+ipcMain.on('client-control-result',(event,id,result)=>{try{const p=sender(event),request=pendingControl.get(id);if(!request||request.accountId!==p.accountId)return;pendingControl.delete(id);if(request.operator)request.done(String(result));else finishControl(request,String(result));}catch{}});
 function processControl(){
  const dir=path.join(app.getPath('userData'),'control/inbox');fs.mkdirSync(dir,{recursive:true});
  for(const file of fs.readdirSync(dir).filter(f=>/^[a-f0-9-]{36}\.json$/.test(f)).slice(0,20)){
@@ -112,20 +142,25 @@ function processControl(){
   const p=[...pages.values()].find(p=>p.accountId===request.accountId&&!p.parent);
   const state=p?store(p.accountId)['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1']:null;
   const decision=recoveryDecision(request,state,controlLedger.budgets[request.accountId]);
+  if(p&&store(p.accountId).__clientManualHold&&['retry','reload-main','reload-player'].includes(request.action)){finishControl(request,'operator-hold');continue;}
   if(!p||!decision.allowed){finishControl(request,p?decision.reason:'account-unavailable');continue;}
   controlLedger.seen[request.id]=Date.now();
   controlLedger.seen=Object.fromEntries(Object.entries(controlLedger.seen).sort((a,b)=>b[1]-a[1]).slice(0,1000));
-  if(['retry','reload-main'].includes(request.action)){const old=controlLedger.budgets[p.accountId]||{};controlLedger.budgets[p.accountId]={lastAt:Date.now(),attempts:[...(old.attempts||[]).filter(at=>Date.now()-at<3600000),Date.now()]};}
+  if(['retry','reload-main','reload-player'].includes(request.action)){const old=controlLedger.budgets[p.accountId]||{};controlLedger.budgets[p.accountId]={lastAt:Date.now(),attempts:[...(old.attempts||[]).filter(at=>Date.now()-at<3600000),Date.now()]};}
   write('control-ledger.json',controlLedger);
   if(request.action==='inspect'){update();finishControl(request,'inspected');}
   if(request.action==='notify'){notify('codex:'+p.accountId,'账号标识 '+p.accountId.slice(0,6)+' 需要检查；Codex未能确认自动恢复，请查看客户端。');finishControl(request,barkConfig?'notification-attempted':'desktop-only-bark-unconfigured');}
   if(request.action==='reload-main'){p.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}
+  if(request.action==='reload-player'){const child=[...pages.values()].find(c=>c.parent===p.view.webContents.id&&c.accountId===p.accountId);if(child){child.view.webContents.reload();finishControl(request,'reloaded-needs-verification');}else finishControl(request,'player-unavailable');}
   if(request.action==='retry'){pendingControl.set(request.id,request);p.view.webContents.send('client-control',{id:request.id,action:'retry'});setTimeout(()=>{if(pendingControl.delete(request.id))finishControl(request,'delivery-unknown');},10000);}
  }
 }
 ipcMain.handle('panel-command',async(event,op,id)=>{
   if(!trustedPanel(event))return;
   if(op==='state'){update();return;}
+  if(op==='rescue-enabled'&&typeof id==='boolean'){write('rescue-config.json',{enabled:id});update();return;}
+  if(op==='batch'&&['start','pause','stop'].includes(id)){batch.run(id).catch(()=>notify('batch','群控发送失败，请查看账号结果。'));return {accepted:true};}
+  if(op==='account-action'&&accounts.some(a=>a.id===id?.accountId)&&['start','pause','stop'].includes(id.action)){batch.run(id.action,[id.accountId]).catch(()=>{});return {accepted:true};}
   if(op==='collapse'&&accounts.some(a=>a.id===id?.accountId)&&typeof id.collapsed==='boolean'){panelPreferences[id.accountId]=id.collapsed;write('panel.json',panelPreferences);update();return;}
   if(op==='collapse-all'&&typeof id==='boolean'){for(const a of accounts)panelPreferences[a.id]=id;write('panel.json',panelPreferences);update();return;}
   if(op==='bark'){
@@ -150,6 +185,10 @@ app.whenReady().then(async()=>{
   panelPreferences=Object.fromEntries(Object.entries(savedPanel&&typeof savedPanel==='object'?savedPanel:{}).filter(([id,value])=>/^[a-f0-9-]{36}$/.test(id)&&typeof value==='boolean'));
   accounts=read('accounts.json',[]);if(!Array.isArray(accounts))throw new Error('账号配置格式错误');for(const a of accounts)partition(a.id);
   controlLedger=read('control-ledger.json',{seen:{},budgets:{}});targets=read('watch-targets.json',{accounts:[]});
+  if(!selfTest){write('client-owner.json',{pid:process.pid,running:true,at:Date.now()});
+    worker=require('node:child_process').spawn(process.execPath,[path.join(__dirname,'rescue-worker.cjs'),'--root',app.getPath('userData')],{windowsHide:true,stdio:'ignore',env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}});
+    worker.on('error',()=>notify('rescue','本地 Codex 异常接管未能启动，请检查。'));
+  }
   if(!selfTest)for(const a of accounts)if(canResume(a.id,store(a.id),targets))resumeOnLoad.add(a.id);
   if(!selfTest&&!accounts.length){accounts=[account('账号 1'),account('账号 2')];write('accounts.json',accounts);}
   const savedBark=read('bark.json',null);
@@ -174,4 +213,4 @@ app.whenReady().then(async()=>{
   if(selfTest){closing=true;await require('./tests/engine-selftest.cjs')({accounts,configure,open,pages,store,win,app,processControl});}
 }).catch(error=>{dialog.showErrorBox('客户端启动失败',error.message);app.quit();});
 app.on('window-all-closed',()=>app.quit());
-app.on('will-quit',()=>{clearTimeout(diagnosticsTimer);storeWriter.dispose();});
+app.on('will-quit',()=>{if(!selfTest)write('client-owner.json',{pid:process.pid,running:false,at:Date.now()});worker?.kill();clearTimeout(diagnosticsTimer);storeWriter.dispose();});

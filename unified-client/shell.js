@@ -2,6 +2,14 @@
 const root=document.getElementById('accounts'),cards=new Map();
 function element(tag,cls,text=''){const node=document.createElement(tag);node.className=cls;node.textContent=text;return node;}
 function button(text,op,id,cls=''){const b=element('button',cls,text);b.type='button';b.onclick=()=>window.client.command(op,id);return b;}
+const group=element('div','group-controls'),groupStatus=element('p','group-status'),rescueStatus=element('p','rescue-status');
+groupStatus.setAttribute('role','status');rescueStatus.setAttribute('role','status');
+group.append(element('strong','','群控'),button('全部开始 / 继续','batch','start'),button('全部暂停','batch','pause'),button('全部停止','batch','stop','danger'),groupStatus,rescueStatus);
+for(const [index,action]of ['start','pause','stop'].entries())group.querySelectorAll('button')[index].id='batch-'+action;
+document.querySelector('.account-toolbar').before(group);
+let rescueEnabled=true;
+const rescueToggle=element('button','','关闭异常接管');rescueToggle.type='button';rescueToggle.onclick=()=>window.client.command('rescue-enabled',!rescueEnabled);group.append(rescueToggle);
+const resultLabels={'dispatched-needs-verification':'已下发，等待状态核验','already-running':'已在运行','already-stopped':'已停止','already-paused':'已暂停','already-complete':'专题已完成','login-required':'需重新登录','helper-unavailable':'助手未就绪','delivery-unknown':'未收到回执，请检查','account-unavailable':'页面未打开','dispatch-failed':'发送失败','cancelled-by-new-command':'已由新命令取消'};
 document.getElementById('add').onclick=()=>window.client.command('add');
 document.getElementById('collapse-all').onclick=()=>window.client.command('collapse-all',true);
 document.getElementById('expand-all').onclick=()=>window.client.command('collapse-all',false);
@@ -20,9 +28,11 @@ function createCard(id){
  const issue=element('p','issue');issue.setAttribute('role','status');
  const actions=element('div','account-actions'),play=button('▶ 查看播放','player',id),home=button('专题 / 首页','home',id);actions.append(play,home);
  const renameLabel=element('label','rename-label','账号备注'),rename=element('input','account-rename');rename.setAttribute('aria-label','账号备注');rename.maxLength=40;rename.onchange=()=>window.client.command('rename',{accountId:id,name:rename.value});renameLabel.append(rename);
- const stateText=element('p','status'),learning=element('div','learning-details'),tabs=element('div','account-tabs');details.append(learning,renameLabel,stateText,tabs);
- section.append(header,course,progressRow,issue,actions,details);root.append(section);
- return {section,title,badge,toggle,details,course,progress,progressText,issue,play,rename,stateText,learning,tabs,tabSignature:''};
+ const individual=element('div','account-actions');for(const [text,action]of [['开始 / 继续','start'],['暂停','pause'],['停止','stop']])individual.append(button(text,'account-action',{accountId:id,action}));
+ const commandResult=element('p','command-result');commandResult.setAttribute('role','status');
+ const stateText=element('p','status'),learning=element('div','learning-details'),tabs=element('div','account-tabs');details.append(individual,learning,renameLabel,stateText,tabs);
+ section.append(header,course,progressRow,issue,actions,commandResult,details);root.append(section);
+ return {section,title,badge,toggle,details,course,progress,progressText,issue,play,rename,stateText,learning,tabs,commandResult,tabSignature:''};
 }
 function updateCard(card,a,state){
  card.title.textContent=a.name;card.title.title=a.name;
@@ -37,6 +47,7 @@ function updateCard(card,a,state){
  card.progress.hidden=!known;card.progress.value=known?Math.max(0,Math.min(100,value)):0;
  card.progress.setAttribute('aria-label',a.name+'服务器课程进度');card.progressText.textContent=known?'服务器 '+Number(value.toFixed(2))+'%':'进度未读取';
  card.issue.textContent=problem;card.issue.hidden=!problem;
+ card.commandResult.hidden=!a.operatorResult;card.commandResult.textContent=a.operatorResult?(resultLabels[a.operatorResult.result]||a.operatorResult.result):'';
  card.play.hidden=!a.tabs.some(t=>t.kind==='播放器');
  if(document.activeElement!==card.rename)card.rename.value=a.name;
  card.stateText.textContent=a.states.map(s=>s.message).filter(Boolean).join(' · ')||'从专题助手点击开始';
@@ -48,6 +59,11 @@ function updateCard(card,a,state){
  if(signature!==card.tabSignature){card.tabSignature=signature;card.tabs.replaceChildren();for(const t of a.tabs){const row=element('div','page-row');row.append(button(t.kind+' · '+t.title,'show',t.id,'tab'+(t.id===state.active?' active':'')));const controls=element('div','page-actions');controls.append(button('重新加载','reload',t.id),button('助手菜单','menu',t.id),button('关闭','close',t.id,'danger'));row.append(controls);card.tabs.append(row);}}
 }
 window.client.onState(state=>{
+ const batch=state.batch;
+ groupStatus.textContent=batch?({start:'开始 / 继续',pause:'暂停',stop:'停止'}[batch.action])+'：'+batch.results.length+'/'+batch.total+' 已返回'+(batch.running?' · 发送中':' · 已结束，请核对账号状态'): '开始会错峰发送；停止会取消待发送的开始命令。';
+ const rescue=state.rescue;
+ rescueEnabled=rescue?.status!=='disabled';rescueToggle.textContent=rescueEnabled?'关闭异常接管':'开启异常接管';
+ rescueStatus.textContent=rescue&&Date.now()-rescue.at<45000?'本地异常接管：'+({watching:'监听中，异常时触发 Codex',handling:'Codex 正在分析异常',verifying:'正在核验恢复',failed:'接管失败，需检查',disabled:'已关闭'}[rescue.status]||rescue.status):'本地异常接管：等待监听器心跳';
  document.getElementById('reminders').textContent=state.barkEnabled?'Bark 已配置':'Bark 未配置';
  const live=new Set(state.accounts.map(a=>a.id));for(const [id,card]of cards)if(!live.has(id)){card.section.remove();cards.delete(id);}
  for(const a of state.accounts){if(!cards.has(a.id))cards.set(a.id,createCard(a.id));updateCard(cards.get(a.id),a,state);}

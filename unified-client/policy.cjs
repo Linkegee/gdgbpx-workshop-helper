@@ -15,5 +15,5 @@ function summarize(values,scopes=null) {
       lesson:String(s.currentLessonTitle||'').slice(0,120),progress:s.currentLessonProgress}));
 }
 function latestTask(values){return Object.entries(values).filter(([k])=>k.endsWith(':gdgbpx_workshop_helper_state_v1')).map(([k,state])=>({state,at:Date.parse(values[k.replace('state_v1','logs_v1')]?.at(-1)?.time||'')||Number(state.lastActionAt)||0})).sort((a,b)=>b.at-a.at)[0]?.state||null;}
-function canResume(id,values,targets){const target=targets?.accounts?.find(t=>t.id===id),state=latestTask(values);return Boolean(target&&!target.done&&state?.status==='running'&&!state.userPaused&&!values.__clientLearning?.workshops?.[target.classId]?.allCompleted);}
+function canResume(id,values,targets){const target=targets?.accounts?.find(t=>t.id===id),state=latestTask(values);return Boolean(target&&!target.done&&!values.__clientManualHold&&state?.status==='running'&&!state.userPaused&&!values.__clientLearning?.workshops?.[target.classId]?.allCompleted);}
 module.exports={allowedPage,partition,account,summarize,latestTask,canResume};

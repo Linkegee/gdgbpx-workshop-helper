@@ -18,11 +18,14 @@ if(window.top===window&&location.hostname==='gbpx.gd.gov.cn'){
  const capture=()=>{try{const value=collectLearning(document,location.href);if(value)call('learning',value);}catch{}};
  window.addEventListener('DOMContentLoaded',()=>setTimeout(capture,1500),{once:true});
  window.addEventListener('hashchange',()=>setTimeout(capture,1500));setInterval(capture,10000);
+ let clientCommandGeneration=0;
  ipcRenderer.on('client-control',async(_event,command)=>{
-  const action=command.action==='retry'?'continue':command.action==='start'?'start':null;
+  const generation=++clientCommandGeneration;
+  const action=command.action==='retry'?'continue':['start','pause','stop','continue'].includes(command.action)?command.action:null;
   if(!action)return;
   for(let attempt=0;attempt<30;attempt++){
-   if(Array.from(document.querySelectorAll('input[type="password"]')).some(n=>n.getClientRects().length)){ipcRenderer.send('client-control-result',command.id,'login-required');return;}
+   if(generation!==clientCommandGeneration){ipcRenderer.send('client-control-result',command.id,'cancelled-by-new-command');return;}
+   if(!['pause','stop'].includes(action)&&Array.from(document.querySelectorAll('input[type="password"]')).some(n=>n.getClientRects().length)){ipcRenderer.send('client-control-result',command.id,'login-required');return;}
    const button=document.querySelector('#gbpx-helper-panel [data-action="'+action+'"]');
    if(button&&!button.disabled){capture();button.click();ipcRenderer.send('client-control-result',command.id,'dispatched-needs-verification');return;}
    await new Promise(resolve=>setTimeout(resolve,200));
