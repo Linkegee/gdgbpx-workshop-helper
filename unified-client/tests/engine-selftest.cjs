@@ -189,7 +189,33 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     fs.writeFileSync(path.join(input,heldRequest.id+'.json'),JSON.stringify(heldRequest));processControl();
     assert.equal(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'control/results',heldRequest.id+'.json'),'utf8')).result,'operator-hold');
     aw.reload();await until(async()=>await aw.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
-    console.log('ENGINE PASS: bulk pause/resume/stop through real IPC; immediate persistent operator hold; recovery refused after stop; per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
+    // Reversible removal uses the real trusted panel IPC, with only the native confirmation mocked.
+    const nativeDialog=require('electron').dialog,originalDialog=nativeDialog.showMessageBox;
+    const readSaved=name=>JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),name),'utf8'));
+    try{
+      nativeDialog.showMessageBox=async()=>({response:0});
+      await panel.executeJavaScript(`window.client.command('remove-account',${JSON.stringify(a.id)})`);
+      assert.equal(aw.isDestroyed(),false,'cancel preserves account pages');
+      const removedChildId=open(a.id,'https://cs1.gdgbpx.com/second',aid,false),removedChild=pages.get(removedChildId).view.webContents;
+      store(a.id)[stateKey]={...store(a.id)[stateKey],status:'running',phase:'watching',userPaused:false};
+      nativeDialog.showMessageBox=async(_win,options)=>{assert.equal(options.defaultId,0);assert.ok(options.detail.includes('正在运行'));return {response:1};};
+      await panel.executeJavaScript(`window.client.command('remove-account',${JSON.stringify(a.id)})`);
+      await until(()=>aw.isDestroyed()&&removedChild.isDestroyed());
+      assert.equal([...pages.values()].some(p=>p.accountId===a.id),false);
+      assert.equal(pages.has(bid),true,'removal preserves sibling main page');
+      assert.equal(readSaved('accounts.json').some(x=>x.id===a.id),false);
+      assert.equal(readSaved('removed-accounts.json')[0].account.id,a.id);
+      assert.equal(store(a.id)[stateKey].status,'stopped');
+      assert.equal(store(a.id).__clientManualHold.action,'stop');
+      await panel.executeJavaScript(`window.client.command('restore-account',${JSON.stringify(a.id)})`);
+      const restored=[...pages.values()].find(p=>p.accountId===a.id&&!p.parent).view.webContents;
+      await until(async()=>await restored.executeJavaScript('localStorage.getItem("fixture")==="account-a"'));
+      assert.equal(store(a.id)[stateKey].status,'stopped','restore must not resume stored running state');
+      assert.equal(readSaved('removed-accounts.json').length,0);
+      await panel.executeJavaScript(`window.client.command('restore-account',${JSON.stringify(a.id)})`);
+      assert.equal([...pages.values()].filter(p=>p.accountId===a.id&&!p.parent).length,1);
+    }finally{nativeDialog.showMessageBox=originalDialog;}
+    console.log('ENGINE PASS: reversible removal, cancel, restore preserving partition and stopped state, sibling isolation; bulk pause/resume/stop through real IPC; immediate persistent operator hold; recovery refused after stop; per-account disclosure; bulk disclosure; persisted preferences; focus preserved; collapse leaves player/audio intact; single-instance lock; isolated sessions; sandbox; Vue authorization; managed launch; nested media/mute; independent audio; viewport; duplicate limit; native view release; close callback; sibling preserved; client version path; reload');
     app.exit(0);
   }catch(error){console.error('ENGINE FAIL:',error);for(const p of pages.values())console.error('fixture DOM:',await p.view.webContents.executeJavaScript('document.body?.innerText'));app.exit(1);}
 };

@@ -20,7 +20,7 @@ if(!primary){console.log('SECONDARY_BLOCKED');app.quit();}
 app.on('second-instance',()=>{if(win&&!win.isDestroyed()){if(win.isMinimized())win.restore();win.show();win.focus();}});
 let win,accounts=[],active='',diagnosticsTimer,blocker=null,closing=false,barkConfig=null,panelPreferences={};
 let controlLedger={seen:{},budgets:{}},targets={accounts:[]};const pendingControl=new Map(),resumeOnLoad=new Set();
-let worker=null;
+let worker=null;let removedAccounts=read('removed-accounts.json',[]);const removingAccounts=new Set();
 const operatorResults={};
 const batch=createBatch({ids:()=>accounts.map(a=>a.id),prepare:(id,action)=>{
  const values=store(id);values.__clientManualHold=action==='start'?null:{action,at:Date.now()};
@@ -47,7 +47,7 @@ let selectedVisualTimer=null;
 function store(id){if(!stores.has(id))stores.set(id,read('helper-'+id+'.json',{}));return stores.get(id);}
 function notify(key,message){if(Date.now()-(alerts.get(key)||0)<300000)return;alerts.set(key,Date.now());if(Notification.isSupported())new Notification({title:'学院统一客户端',body:message}).show();if(barkConfig&&!selfTest)session.defaultSession.fetch('https://api.day.app/push',{method:'POST',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_key:barkConfig.key,title:'学院客户端需要检查',body:message,group:'干部学院'}),signal:AbortSignal.timeout(15000)}).catch(()=>{});}
 function liveStates(accountId){const scopes=new Set([...pages.values()].filter(p=>p.accountId===accountId).map(p=>p.metadata.gdgbpxScopeV2?.id).filter(Boolean));return summarize(store(accountId),scopes);}
-function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',visualHealth:p.visualHealth,kind:p.parent?'播放器':'专题 / 首页'}))})),active,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
+function snapshot(){return {accounts:accounts.map(a=>({...a,operatorResult:operatorResults[a.id]||null,collapsed:panelPreferences[a.id]!==false,learning:store(a.id).__clientLearning||null,states:liveStates(a.id),tabs:[...pages.values()].filter(p=>p.accountId===a.id).map(p=>({id:p.view.webContents.id,title:p.title||'正在加载',issue:p.issue||'',visualHealth:p.visualHealth,kind:p.parent?'播放器':'专题 / 首页'}))})),active,removedCount:removedAccounts.length,batch:batch.state,rescue:read('rescue-status.json',null),barkEnabled:Boolean(barkConfig)};}
 function update(){if(win&&!win.isDestroyed())win.webContents.send('panel-state',snapshot());if(!diagnosticsTimer&&!selfTest&&!closing)diagnosticsTimer=setTimeout(()=>{diagnosticsTimer=null;try{write('diagnostics/latest.json',report(app.getVersion(),accounts,pages,stores));}catch{}},2000);}
 function layout(){if(!win||win.isDestroyed())return;present({win,pages,active});update();if(!selfTest){clearTimeout(selectedVisualTimer);selectedVisualTimer=setTimeout(()=>visualWatch.scan(active).catch(()=>{}),400);}}
 function muteForScope(accountId,scopeId,muted){for(const p of pages.values()){const owner=p.metadata.gdgbpxScopeV2?.id||pages.get(p.parent)?.metadata.gdgbpxScopeV2?.id;if(p.accountId===accountId&&owner===scopeId)p.view.webContents.setAudioMuted(muted!==false);}}
@@ -141,7 +141,7 @@ ipcMain.handle('helper-request',async(event,request)=>{
 function trustedPanel(event){return event.sender===win.webContents&&event.senderFrame===win.webContents.mainFrame;}
 function finishControl(request,result){write('control/results/'+request.id+'.json',{id:request.id,accountId:request.accountId,action:request.action,result,at:Date.now()});try{fs.unlinkSync(path.join(app.getPath('userData'),'control/inbox',request.id+'.json'));}catch{}}
 function operatorDispatch(accountId,action){
- const p=[...pages.values()].find(p=>p.accountId===accountId&&!p.parent),state=p?store(accountId)['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1']:null;
+ const p=accounts.some(a=>a.id===accountId)?[...pages.values()].find(p=>p.accountId===accountId&&!p.parent):null,state=p?store(accountId)['gdgbpx_account_v1:'+p.metadata.gdgbpxScopeV2?.id+':gdgbpx_workshop_helper_state_v1']:null;
  const immediate=result=>{operatorResults[accountId]={action,result,at:Date.now()};update();return Promise.resolve(result);};
  if(!p)return immediate('account-unavailable');
  if(action==='start'&&state?.status==='running')return immediate('already-running');
@@ -188,8 +188,38 @@ function processControl(){
   if(request.action==='retry'){pendingControl.set(request.id,request);p.view.webContents.send('client-control',{id:request.id,action:'retry'});setTimeout(()=>{if(pendingControl.delete(request.id))finishControl(request,'delivery-unknown');},10000);}
  }
 }
+async function removeAccount(id){
+ const item=accounts.find(a=>a.id===id);if(!item||removingAccounts.has(id))return;removingAccounts.add(id);
+ try{
+  const running=liveStates(id).some(s=>s.status==='running');
+  const answer=await dialog.showMessageBox(win,{type:'warning',title:'移除账号',message:'移除“'+item.name+'”？',detail:(running?'此账号正在运行，移除会停止播放并关闭其页面。\n':'')+'仅移除此账号，不影响其他账号。登录数据与学习记录保留，可在“已移除账号”中恢复。',buttons:['取消','移除账号'],defaultId:0,cancelId:0,noLink:true});
+  if(answer.response!==1||!accounts.some(a=>a.id===id))return;
+  const values=store(id),stoppedAt=Date.now();values.__clientManualHold={action:'stop',at:stoppedAt};
+  for(const [key,state]of Object.entries(values))if(key.endsWith(':gdgbpx_workshop_helper_state_v1')&&state&&typeof state==='object')values[key]={...state,status:'stopped',phase:'stopped',message:'账号已移除，恢复后请手动开始',userPaused:true,stopRequestAt:stoppedAt,maintenance:null};
+  write('helper-'+id+'.json',values);resumeOnLoad.delete(id);batch.cancelAccount(id);
+  removedAccounts=[...removedAccounts.filter(a=>a.account.id!==id),{account:item,target:targets.accounts.find(t=>t.id===id)||null,at:Date.now()}];write('removed-accounts.json',removedAccounts);
+  accounts=accounts.filter(a=>a.id!==id);write('accounts.json',accounts);
+  targets.accounts=targets.accounts.filter(t=>t.id!==id);write('watch-targets.json',targets);
+  for(const [key,request]of pendingControl)if(request.accountId===id){pendingControl.delete(key);if(request.operator)request.done('account-unavailable');else finishControl(request,'operator-hold');}
+  const owned=[...pages.entries()].filter(([,p])=>p.accountId===id).sort((a,b)=>Boolean(b[1].parent)-Boolean(a[1].parent));
+  if(owned.some(([key])=>key===active))active='';
+  for(const [key,p]of owned){win.contentView.removeChildView(p.view);pages.delete(key);visualWatch.remove(key);p.view.webContents.close({waitForBeforeUnload:false});}
+  layout();return {removed:true};
+ }finally{removingAccounts.delete(id);}
+}
+function restoreAccount(id){
+ const saved=removedAccounts.find(a=>a.account.id===id);if(!saved||accounts.some(a=>a.id===id))return;
+ accounts.push(saved.account);write('accounts.json',accounts);
+ if(saved.target&&!targets.accounts.some(t=>t.id===id)){targets.accounts.push(saved.target);write('watch-targets.json',targets);}
+ removedAccounts=removedAccounts.filter(a=>a.account.id!==id);write('removed-accounts.json',removedAccounts);
+ // Persisted manual stop deliberately survives restoration and restart.
+ open(id);update();return {restored:true};
+}
 ipcMain.handle('panel-command',async(event,op,id)=>{
   if(!trustedPanel(event))return;
+  if(op==='remove-account')return removeAccount(id);
+  if(op==='restore-account')return restoreAccount(id);
+  if(op==='removed-accounts'){Menu.buildFromTemplate(removedAccounts.length?removedAccounts.map(r=>({label:'恢复 '+r.account.name,click:()=>restoreAccount(r.account.id)})):[{label:'暂无已移除账号',enabled:false}]).popup({window:win});return;}
   if(op==='state'){update();return;}
   if(op==='overview'){active='';layout();return;}
   if(op==='rescue-enabled'&&typeof id==='boolean'){write('rescue-config.json',{enabled:id});update();return;}
@@ -204,7 +234,7 @@ ipcMain.handle('panel-command',async(event,op,id)=>{
     write('bark.json',{key:safeStorage.encryptString(barkConfig.key).toString('base64'),minutes:barkConfig.minutes});update();return;
   }
   if(op==='rename'){const a=accounts.find(a=>a.id===id?.accountId);if(a&&typeof id.name==='string'){a.name=id.name.slice(0,40)||a.name;write('accounts.json',accounts);update();}return;}
-  if(op==='add'){const a=account('账号 '+(accounts.length+1));accounts.push(a);write('accounts.json',accounts);open(a.id);return;}
+  if(op==='add'){const names=new Set([...accounts,...removedAccounts.map(r=>r.account)].map(a=>a.name));let number=1;while(names.has('账号 '+number))number++;const a=account('账号 '+number);accounts.push(a);write('accounts.json',accounts);open(a.id);return;}
   const p=pages.get(Number(id));
   if(op==='show'&&p){active=Number(id);layout();}
   if(op==='player'&&accounts.some(a=>a.id===id)){const player=[...pages.values()].find(p=>p.accountId===id&&p.parent);if(player){active=player.view.webContents.id;layout();}}
@@ -225,7 +255,7 @@ app.whenReady().then(async()=>{
     worker.on('error',()=>notify('rescue','本地 Codex 异常接管未能启动，请检查。'));
   }
   if(!selfTest)for(const a of accounts)if(canResume(a.id,store(a.id),targets))resumeOnLoad.add(a.id);
-  if(!selfTest&&!accounts.length){accounts=[account('账号 1'),account('账号 2')];write('accounts.json',accounts);}
+  if(!selfTest&&!accounts.length&&!removedAccounts.length){accounts=[account('账号 1'),account('账号 2')];write('accounts.json',accounts);}
   const savedBark=read('bark.json',null);
   if(savedBark&&safeStorage.isEncryptionAvailable()){try{barkConfig={key:safeStorage.decryptString(Buffer.from(savedBark.key,'base64')),minutes:savedBark.minutes};}catch{}}
   if(!barkConfig&&!selfTest&&process.env.DAZHONG_BARK_KEY&&safeStorage.isEncryptionAvailable()){

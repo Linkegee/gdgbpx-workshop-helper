@@ -10,3 +10,11 @@ test('stop cancels a pending start queue; unknown IDs cannot receive a command',
  const start=batch.run('start',['a','b','foreign']);await batch.run('stop');release();await start;
  assert.deepEqual(sent,['start:a','stop:a','stop:b']);assert.equal(batch.state.action,'stop');assert.equal(batch.state.results.length,2);
 });
+
+test('removing and restoring one queued account cancels only its old command',async()=>{
+ const sent=[];let release;const gate=new Promise(r=>release=r);
+ const batch=createBatch({ids:()=>['a','b','c'],prepare:()=>{},dispatch:async id=>{sent.push(id);if(id==='a')await gate;return 'ok';},changed:()=>{},sleep:async()=>{}});
+ const pending=batch.run('start');batch.cancelAccount('b');release();await pending;
+ assert.deepEqual(sent,['a','c']);assert.equal(batch.state.results[1].result,'cancelled-by-new-command');
+ await batch.run('start',['b']);assert.deepEqual(sent,['a','c','b']);
+});

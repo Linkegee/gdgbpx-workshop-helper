@@ -11,6 +11,7 @@ let rescueEnabled=true;
 const rescueToggle=element('button','','关闭异常接管');rescueToggle.type='button';rescueToggle.onclick=()=>window.client.command('rescue-enabled',!rescueEnabled);group.append(rescueToggle);
 const resultLabels={'dispatched-needs-verification':'已下发，等待状态核验','already-running':'已在运行','already-stopped':'已停止','already-paused':'已暂停','already-complete':'专题已完成','login-required':'需重新登录','helper-unavailable':'助手未就绪','delivery-unknown':'未收到回执，请检查','account-unavailable':'页面未打开','dispatch-failed':'发送失败','cancelled-by-new-command':'已由新命令取消'};
 document.getElementById('overview-button').onclick=()=>window.client.command('overview');
+const removedButton=button('已移除账号','removed-accounts');removedButton.id='removed-accounts';document.getElementById('add').after(removedButton);
 document.getElementById('add').onclick=()=>window.client.command('add');
 let collapseAllNext=false;
 document.getElementById('toggle-all').onclick=()=>window.client.command('collapse-all',collapseAllNext);
@@ -31,7 +32,7 @@ function createCard(id){
  const renameLabel=element('label','rename-label','账号备注'),rename=element('input','account-rename');rename.setAttribute('aria-label','账号备注');rename.maxLength=40;rename.onchange=()=>window.client.command('rename',{accountId:id,name:rename.value});renameLabel.append(rename);
  const individual=element('div','account-actions');for(const [text,action]of [['开始 / 继续','start'],['暂停','pause'],['停止','stop']])individual.append(button(text,'account-action',{accountId:id,action}));
  const commandResult=element('p','command-result');commandResult.setAttribute('role','status');
- const stateText=element('p','status'),learning=element('div','learning-details'),tabs=element('div','account-tabs');details.append(individual,learning,renameLabel,stateText,tabs);
+ const stateText=element('p','status'),learning=element('div','learning-details'),tabs=element('div','account-tabs');const management=element('div','account-management');management.append(button('移除账号','remove-account',id,'danger'),element('span','','保留记录，可恢复'));details.append(individual,learning,renameLabel,stateText,tabs,management);
  section.append(header,course,progressRow,issue,actions,commandResult,details);root.append(section);
  return {section,title,badge,toggle,details,course,progress,progressText,issue,play,rename,stateText,learning,tabs,commandResult,tabSignature:''};
 }
@@ -63,7 +64,7 @@ function updateCard(card,a,state){
  if(signature!==card.tabSignature){card.tabSignature=signature;card.tabs.replaceChildren();for(const t of a.tabs){const row=element('div','page-row');row.append(button(t.kind+' · '+t.title,'show',t.id,'tab'+(t.id===state.active?' active':'')));const controls=element('div','page-actions');controls.append(button('重新加载','reload',t.id),button('助手菜单','menu',t.id),button('关闭','close',t.id,'danger'));row.append(controls);card.tabs.append(row);}}
 }
 window.client.onState(state=>{
- updateOverview(state);
+ updateOverview(state);removedButton.textContent='已移除账号'+(state.removedCount?'（'+state.removedCount+'）':'');
  collapseAllNext=state.accounts.some(a=>!a.collapsed);
  const toggleAll=document.getElementById('toggle-all');toggleAll.textContent=collapseAllNext?'全部收纳':'全部展开';toggleAll.setAttribute('aria-expanded',String(collapseAllNext));toggleAll.disabled=!state.accounts.length;
  const batch=state.batch;
