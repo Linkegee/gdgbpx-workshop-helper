@@ -1,4 +1,6 @@
 'use strict';
+// Current user policy: all study is through required-credit workshops.
+const STUDY_HOURS_TARGET=50;
 function accountOverview(a,now=Date.now()){
  const s=(a.states||[]).filter(s=>s.status==='running').sort((a,b)=>(b.media?.at||0)-(a.media?.at||0))[0]||a.states?.[0];
  const topic=a.learning?.workshops?.[s?.classId||a.learning?.currentClassId];
@@ -7,7 +9,8 @@ function accountOverview(a,now=Date.now()){
  const ended=s?.media?.duration>0&&s.media.currentTime>=s.media.duration-1&&s.media.paused===true;
  const playing=s?.status==='running'&&s.media?.paused===false&&fresh(s.media.at);
  const status=issue?'需处理':topic?.allCompleted?'专题已完成':ended?'结束待核验':playing?'播放中':s?.status==='running'?'等待播放确认':s?.status==='paused'?'已暂停':s?.status==='stopped'?'已停止':'未启动';
- const required=a.learning?.required;
+ const rawRequired=a.learning?.required;
+ const required=rawRequired?{...rawRequired,websiteTarget:rawRequired.target,target:STUDY_HOURS_TARGET}:null;
  const topics=Object.values(a.learning?.workshops||{}),pending=topics.filter(t=>(t.creditStatus==='pending'||(t.creditStatus!=='credited'&&t.verificationComplete&&!t.allCompleted))&&Number.isFinite(t.completedHours));
  const unknown=topics.filter(t=>t.creditStatus!=='credited'&&t.creditStatus!=='pending'&&t.allCompleted&&t.completedHours>0);
  const pendingHours=pending.reduce((n,t)=>n+t.completedHours,0);
