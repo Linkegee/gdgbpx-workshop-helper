@@ -56,7 +56,7 @@ function updateCard(card,a,state){
  if(document.activeElement!==card.rename)card.rename.value=a.name;
  card.stateText.textContent=a.states.map(s=>s.message).filter(Boolean).join(' · ')||'从专题助手点击开始';
  const info=a.learning,topic=info?.workshops?.[current?.classId||info?.currentClassId];
- const lines=[['首页显示学时',info?.home?info.home.hours+'（'+new Date(info.home.at).toLocaleString('zh-CN')+'）':'未读取，进入首页后更新'],['当前专题',current?.workshop||topic?.title||'未读取'],['必修完成',topic?topic.completed+' / '+topic.total+' 门':'未读取'],['完成课程标注学时',topic?.completedHours!=null?topic.completedHours+' / '+topic.totalHours+'（非年度累计）':'课程学时未读取'],['已完成专题',String(current?.finishedWorkshops?.length||0)]];
+ const lines=[['必修正式学时',info?.required?info.required.earned+' / '+info.required.target:'等待首页读取'],['当前专题',current?.workshop||topic?.title||'未读取'],['专题课程完成',topic?topic.completed+' / '+topic.total+' 门':'未读取'],['完成课程标注学时',topic?.completedHours!=null?topic.completedHours+' / '+topic.totalHours+'（非年度累计）':'课程学时未读取'],['已完成专题',String(current?.finishedWorkshops?.length||0)]];
  const learningSignature=JSON.stringify([lines,info?.workshops]);
  if(card.learningSignature!==learningSignature){card.learningSignature=learningSignature;card.learning.replaceChildren(element('h4','','学习情况'));for(const [name,value]of lines){const row=element('p','learning-row');row.append(element('span','learning-label',name),element('span','learning-value',value));card.learning.append(row);}if(topic)card.learning.append(element('p','learning-updated','最近核验：'+new Date(topic.at).toLocaleTimeString('zh-CN')+' · '+(topic.allCompleted?'服务器显示全部完成':topic.verificationComplete?'仍有未完成课程':'课程列表未完整核验')));for(const t of Object.values(info?.workshops||{})){card.learning.append(element('p','topic-row',t.title+' · '+t.completed+'/'+t.total+'门'+(t.allCompleted?' · 已完成':'')));}}
  const signature=JSON.stringify(a.tabs.map(t=>[t.id,t.title,t.kind,t.issue,t.id===state.active]));
@@ -98,10 +98,12 @@ function updateOverview(state){
   row.tr.hidden=filter==='attention'?!r.attention:filter==='incomplete'?r.topic?.allCompleted===true:false;if(!row.tr.hidden)visible++;
   row.tr.classList.toggle('attention-row',r.attention);const c=row.cells,t=r.topic;
   c[0].replaceChildren(element('strong','',r.name),element('span','table-sub',r.status));
-  c[1].textContent=r.home&&Number.isFinite(r.home.hours)?String(r.home.hours):'— 未读取';c[1].title=r.home?'首页采集：'+new Date(r.home.at).toLocaleString('zh-CN'):'进入首页采集后显示，当前不自动跳转以免打断播放';
-  c[2].textContent=t?.completedHours!=null?t.completedHours+' / '+t.totalHours:'— 未完整读取';c[2].title='当前专题已完成课程的标注学时 / 总学时';
+  c[1].textContent=r.required?r.required.earned+' / '+r.required.target:'— 等待首页读取';c[1].title=r.required?'首页必修学时，采集于 '+new Date(r.required.at).toLocaleString('zh-CN'):'按所属账号会话每60秒读取首页，不跳转当前播放页';
+  c[2].replaceChildren(element('strong','',r.unofficial!=null?r.unofficial+' / '+r.required.target:'—'),element('span','table-sub','含待计入 '+r.pendingHours+' 学时（估算）'+(r.creditUnknown?' · '+r.creditUnknown+' 个已完专题计入状态待核验，未重复相加':'')));
   c[3].replaceChildren(element('strong','',t?t.completed+' / '+t.total:'—'),element('span','table-sub',t?.title||'专题未读取'));if(t&&!t.verificationComplete)c[3].append(element('span','table-sub','列表尚未完整核验'));
-  c[4].replaceChildren(element('span','table-course',r.lesson||'课程未读取'),element('span','table-sub',Number.isFinite(r.progress)?'服务器 '+r.progress+'%':'进度未读取'));
+  c[4].replaceChildren(element('span','table-course',r.lesson||'课程未读取'),element('span','table-sub',Number.isFinite(r.progress)?'服务器 '+r.progress+'%（约30秒更新）':'服务器进度未读取'));
+  if(r.media&&Number.isFinite(r.media.currentTime)&&r.media.duration>0)c[4].append(element('span','table-sub','播放 '+Math.floor(r.media.currentTime/60)+':'+String(Math.floor(r.media.currentTime%60)).padStart(2,'0')+' / '+Math.floor(r.media.duration/60)+':'+String(Math.floor(r.media.duration%60)).padStart(2,'0')+' · '+(100*r.media.currentTime/r.media.duration).toFixed(1)+'%'+(r.media.paused?' · 暂停':'')));
+  else c[4].append(element('span','table-sub','媒体心跳待更新'));
   c[5].textContent=t?new Date(t.at).toLocaleTimeString('zh-CN')+(r.stale?' · 待更新':''):'—';c[5].classList.toggle('stale',r.stale);
  }
  document.getElementById('overview-empty').hidden=visible>0;

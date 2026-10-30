@@ -1,4 +1,8 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');const {ingestLearning}=require('../learning.cjs');
+test('required credits come from the labelled homepage fraction, never cumulative or course count',()=>{
+ const {collectLearning}=require('../learning.cjs');const doc={body:{children:[{tagName:'DIV',innerText:'累计学时：36/50 必修学时：18 / 25'}]}};
+ const v=collectLearning(doc,'https://gbpx.gd.gov.cn/gdceportal/index.aspx');assert.deepEqual(v.required,{earned:18,target:25});assert.deepEqual(ingestLearning(null,v).required,{earned:18,target:25,at:v.at});
+});
 test('official completion flags determine course credit; media percentage cannot complete a topic',()=>{const value=ingestLearning(null,{at:1,classId:'abc',expectedTotal:2,rows:[{title:'A',complete:false,progress:100,hours:1},{title:'B',complete:true,progress:95,hours:0.5}]},'Topic');assert.equal(value.workshops.abc.completed,1);assert.equal(value.workshops.abc.allCompleted,false);assert.equal(value.workshops.abc.completedHours,0.5);assert.equal(value.workshops.abc.totalHours,1.5);});
 test('unknown credits remain unknown; homepage hours survive topic capture',()=>{let value=ingestLearning(null,{at:1,homeHours:12.5});value=ingestLearning(value,{at:2,classId:'abc',expectedTotal:1,rows:[{title:'A',complete:true,hours:null}]});assert.equal(value.home.hours,12.5);assert.equal(value.workshops.abc.completedHours,null);assert.equal(value.workshops.abc.allCompleted,true);});
 test('partial or uncounted DOM rows cannot falsely complete a whole workshop',()=>{for(const expectedTotal of [null,2]){const value=ingestLearning(null,{at:1,classId:'t',expectedTotal,rows:[{title:'A',complete:true,hours:1}]});assert.equal(value.workshops.t.allCompleted,false);}});

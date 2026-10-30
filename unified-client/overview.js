@@ -7,7 +7,12 @@ function accountOverview(a,now=Date.now()){
  const ended=s?.media?.duration>0&&s.media.currentTime>=s.media.duration-1&&s.media.paused===true;
  const playing=s?.status==='running'&&s.media?.paused===false&&fresh(s.media.at);
  const status=issue?'需处理':topic?.allCompleted?'专题已完成':ended?'结束待核验':playing?'播放中':s?.status==='running'?'等待播放确认':s?.status==='paused'?'已暂停':s?.status==='stopped'?'已停止':'未启动';
- return {id:a.id,name:a.name,status,attention:Boolean(issue),playing,topic,home:a.learning?.home,lesson:s?.lesson,progress:s?.progress,stale:topic?!fresh(topic.at):true};
+ const required=a.learning?.required;
+ const topics=Object.values(a.learning?.workshops||{}),pending=topics.filter(t=>(t.creditStatus==='pending'||(t.creditStatus!=='credited'&&t.verificationComplete&&!t.allCompleted))&&Number.isFinite(t.completedHours));
+ const unknown=topics.filter(t=>t.creditStatus!=='credited'&&t.creditStatus!=='pending'&&t.allCompleted&&t.completedHours>0);
+ const pendingHours=pending.reduce((n,t)=>n+t.completedHours,0);
+ const media=s?.media,matchingMedia=media&&(!media.lessonTitle||media.lessonTitle===s?.lesson)&&fresh(media.at);
+ return {required,pendingHours,creditUnknown:unknown.length,unofficial:required?Math.round((required.earned+pendingHours)*100)/100:null,media:matchingMedia?media:null,id:a.id,name:a.name,status,attention:Boolean(issue),playing,topic,home:a.learning?.home,lesson:s?.lesson,progress:s?.progress,stale:topic?!fresh(topic.at):true};
 }
 function overviewTotals(rows){
  const known=rows.filter(r=>r.topic?.verificationComplete&&Number.isFinite(r.topic.completedHours)&&Number.isFinite(r.topic.totalHours));

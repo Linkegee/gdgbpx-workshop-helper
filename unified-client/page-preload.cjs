@@ -26,6 +26,20 @@ if(window.top===window&&location.hostname==='gbpx.gd.gov.cn'){
  const capture=()=>{try{const value=collectLearning(document,location.href);if(value)call('learning',value);}catch{}};
  window.addEventListener('DOMContentLoaded',()=>setTimeout(capture,1500),{once:true});
  window.addEventListener('hashchange',()=>setTimeout(capture,1500));setInterval(capture,10000);
+ let homeProbeBusy=false;
+ const probeRequiredHours=async()=>{
+  if(homeProbeBusy||location.pathname==='/gdceportal/index.aspx')return;homeProbeBusy=true;
+  try{const response=await fetch('/gdceportal/index.aspx',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(12000)});
+   if(!response.ok||new URL(response.url).pathname!=='/gdceportal/index.aspx')return;
+   const doc=new DOMParser().parseFromString(await response.text(),'text/html');
+   // Detached HTML has no innerText layout; collect only text nodes, never execute it.
+   for(const n of doc.querySelectorAll('script,style,iframe'))n.remove();
+   const text=doc.body?.textContent||'';
+   const value=collectLearning({body:{children:[{tagName:'DIV',innerText:text}]}},response.url);
+   if(value?.required)call('learning',value);
+  }catch{}finally{homeProbeBusy=false;}
+ };
+ setTimeout(probeRequiredHours,5000+Math.random()*10000);setInterval(probeRequiredHours,60000);
  let clientCommandGeneration=0;
  ipcRenderer.on('client-control',async(_event,command)=>{
   const generation=++clientCommandGeneration;

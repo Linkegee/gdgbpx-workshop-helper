@@ -13,7 +13,7 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     const a=account('synthetic A'),b=account('synthetic B');accounts.push(a,b);
     for(const item of [a,b]){
       const ses=configure(item.id);
-      ses.protocol.handle('https',request=>new Response(new URL(request.url).pathname.endsWith('playmp4_pc.html')?'<html><title>Synthetic course</title><body><h3>Synthetic course</h3><video></video></body></html>':'<!doctype html><title>Synthetic test</title><body>Fixture</body>',{headers:{'Content-Type':'text/html'}}));
+      ses.protocol.handle('https',request=>new Response(new URL(request.url).pathname==='/gdceportal/index.aspx'?'<html><body>累计学时：36/50 必修学时：'+(item.id===a.id?'18':'19')+'/25</body></html>':new URL(request.url).pathname.endsWith('playmp4_pc.html')?'<html><title>Synthetic course</title><body><h3>Synthetic course</h3><video></video></body></html>':'<!doctype html><title>Synthetic test</title><body>Fixture</body>',{headers:{'Content-Type':'text/html'}}));
       await ses.cookies.set({url:'https://gbpx.gd.gov.cn',name:'fixture_identity',value:item.name,secure:true});
     }
     const aid=open(a.id,'https://gbpx.gd.gov.cn/gdceportal/dist/#/workshop/workshopindex/classList?uid=synthetic-a');
@@ -161,7 +161,9 @@ module.exports=async({accounts,configure,open,pages,store,win,app,processControl
     assert.equal(store(a.id).__clientLearning.workshops.synthetic.total,1);
     assert.equal(store(a.id).__clientLearning.workshops.synthetic.totalHours,0.5);
     await panel.executeJavaScript('window.client.command("state")');
-    assert.ok((await panel.executeJavaScript('document.querySelector(".learning-details").textContent')).includes('必修完成'));
+    assert.ok((await panel.executeJavaScript('document.querySelector(".learning-details").textContent')).includes('专题课程完成'));
+    await until(()=>Boolean(store(a.id).__clientLearning?.required)&&Boolean(store(b.id).__clientLearning?.required));
+    assert.equal(store(a.id).__clientLearning.required.earned,18);assert.equal(store(b.id).__clientLearning.required.earned,19);assert.equal(store(a.id).__clientLearning.required.target,25);
     const retryState=store(a.id)[stateKey];store(a.id)[stateKey]={...retryState,status:'paused',phase:'player-open-failed',userPaused:false};
     const validRequest={id:require('node:crypto').randomUUID(),accountId:a.id,action:'retry',at:Date.now()};
     fs.writeFileSync(path.join(input,validRequest.id+'.json'),JSON.stringify(validRequest));processControl();
